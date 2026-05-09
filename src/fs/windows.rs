@@ -271,7 +271,7 @@ fn logical_public_proxy_target(target: PathBuf) -> PathBuf {
 fn public_powershell_proxy_content(target: &Path) -> String {
     let target = powershell_shim_path(target);
     format!(
-        "# {}\r\n$path = {}\r\nif ($MyInvocation.ExpectingInput) {{ $input | & $path @args }} else {{ & $path @args }}\r\nexit $LASTEXITCODE\r\n",
+        "# {}\r\n$path = {}\r\n$exe = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) {{ 'pwsh.exe' }} else {{ 'powershell.exe' }}\r\nif ($MyInvocation.ExpectingInput) {{ $input | & $exe -noprofile -ex unrestricted -file $path @args }} else {{ & $exe -noprofile -ex unrestricted -file $path @args }}\r\nexit $LASTEXITCODE\r\n",
         cmd_path(&target),
         ps_quote(&target)
     )
@@ -499,6 +499,8 @@ mod tests {
         assert!(shell.contains("pwsh.exe -noprofile -ex unrestricted -file"));
         assert!(cmd.contains("pwsh -noprofile -ex unrestricted -file"));
         assert!(ps1.contains("$path ="));
+        assert!(ps1.contains("Get-Command pwsh.exe"));
+        assert!(ps1.contains("& $exe -noprofile -ex unrestricted -file $path @args"));
         assert!(ps1.contains("\\tool\\current\\.miseo\\foo.ps1"));
     }
 
@@ -590,31 +592,31 @@ mod tests {
     #[test]
     fn powershell_shim_content_uses_mise_env_without_changing_directory() {
         let project_dir = PathBuf::from("C:/Users/user/.miseo/npm-tool/1.0.0+node-24.15.0");
-        let target = PathBuf::from("C:/Users/user/.miseo/npm-tool/1.0.0+node-24.15.0/bin/foo.cmd");
+        let target =
+            PathBuf::from("C:/Users/user/.local/share/mise/installs/node/24.15.0/bin/foo.cmd");
 
         let content = super::powershell_shim_content(&project_dir, &target);
 
         assert!(content.contains("Invoke-Expression (& mise env -C"));
         assert!(!content.contains("Set-Location"));
         assert!(!content.contains("MISEO_CWD"));
-        assert!(content.contains(
-            "& 'C:\\Users\\user\\.miseo\\npm-tool\\1.0.0+node-24.15.0\\bin\\foo.cmd' @args"
-        ));
+        assert!(content.contains("\\installs\\node\\24.15.0\\bin\\foo.cmd' @args"));
     }
 
     #[test]
-    fn powershell_target_path_uses_cmd_sibling_for_extensionless_targets() {
-        let project_dir = PathBuf::from("C:/Users/user/.miseo/npm-tool/1.0.0+node-24.15.0");
-        let target = PathBuf::from("C:/Users/user/.miseo/npm-tool/1.0.0+node-24.15.0/foo");
+    fn public_powershell_proxy_runs_target_script_in_subprocess() {
+        let target = PathBuf::from("C:/Users/user/.miseo/npm-tool/current/.miseo/foo");
 
-        let content =
-            super::powershell_shim_content(&project_dir, &super::powershell_target_path(&target));
+        let content = super::public_powershell_proxy_content(&target);
 
         assert!(
-            content.contains(
-                "& 'C:\\Users\\user\\.miseo\\npm-tool\\1.0.0+node-24.15.0\\foo.cmd' @args"
-            )
+            content
+                .contains("$path = 'C:\\Users\\user\\.miseo\\npm-tool\\current\\.miseo\\foo.ps1'")
         );
+        assert!(content.contains("$exe = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue)"));
+        assert!(content.contains("$input | & $exe -noprofile -ex unrestricted -file $path @args"));
+        assert!(content.contains("else { & $exe -noprofile -ex unrestricted -file $path @args }"));
+        assert!(!content.contains("& $path @args"));
     }
 
     #[test]
@@ -622,11 +624,10 @@ mod tests {
         let tmp = tempdir().unwrap();
         let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let project_dir = root.join("tool/1.0.0+node-24.15.0");
-        let target = project_dir.join("bin/foo.cmd");
+        let target = root.join("global-bin/foo.cmd");
         let shim = project_dir.join(".miseo/foo");
 
-        WindowsFs.mkdir_p(target.parent().unwrap()).unwrap();
-        WindowsFs.write_file(&target, "").unwrap();
+        WindowsFs.mkdir_p(&project_dir).unwrap();
         WindowsFs
             .write_mise_env_shim(&project_dir, &target, &shim)
             .unwrap();
@@ -637,25 +638,21 @@ mod tests {
     }
 
     #[test]
-    fn write_mise_env_shim_prefers_powershell_sibling_for_cmd_targets() {
+    fn write_mise_env_shim_invokes_global_path_for_cmd_targets() {
         let tmp = tempdir().unwrap();
         let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let project_dir = root.join("tool/1.0.0+node-24.15.0");
-        let target = project_dir.join("foo.cmd");
+        let target = root.join("global-bin/foo.cmd");
         let shim = project_dir.join(".miseo/foo");
 
-        WindowsFs.mkdir_p(target.parent().unwrap()).unwrap();
-        WindowsFs.write_file(&target, "").unwrap();
-        WindowsFs
-            .write_file(&target.with_extension("ps1"), "")
-            .unwrap();
+        WindowsFs.mkdir_p(&project_dir).unwrap();
         WindowsFs
             .write_mise_env_shim(&project_dir, &target, &shim)
             .unwrap();
 
         let content = WindowsFs.read_file(&shim.with_extension("ps1")).unwrap();
 
-        assert!(content.contains("\\tool\\1.0.0+node-24.15.0\\foo.ps1' @args"));
+        assert!(content.contains("\\global-bin\\foo.cmd' @args"));
     }
 
     #[test]
@@ -663,7 +660,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let project_dir = root.join("tool/1.0.0+node-24.15.0");
-        let target = project_dir.join("foo");
+        let target = root.join("global-bin/foo");
         let shim = project_dir.join(".miseo/foo");
 
         WindowsFs.mkdir_p(target.parent().unwrap()).unwrap();
@@ -677,6 +674,6 @@ mod tests {
 
         let content = WindowsFs.read_file(&shim.with_extension("ps1")).unwrap();
 
-        assert!(content.contains("\\tool\\1.0.0+node-24.15.0\\foo.ps1' @args"));
+        assert!(content.contains("\\global-bin\\foo.ps1' @args"));
     }
 }

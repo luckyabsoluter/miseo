@@ -5,7 +5,7 @@ use crate::{
     fs::PathBuf,
     mise::Mise,
     spec::{RuntimePins, ToolId, ToolSpec},
-    workspace::{InstallPlan, Workspace},
+    workspace::{InstallMode, InstallPlan, Workspace},
 };
 
 use super::with_new_tool_cleanup;
@@ -62,6 +62,7 @@ pub fn execute(
     tool_spec: ToolSpec,
     uses: RuntimePins,
     force: bool,
+    install_mode: InstallMode,
 ) -> Result<Outcome, Error> {
     let runtime_pins = mise.resolve_runtime_pins(tool_spec.backend(), &uses)?;
 
@@ -87,16 +88,11 @@ pub fn execute(
     };
 
     let started = Instant::now();
-    mise.install_into(
-        plan.runtime_pins(),
-        &exact_spec,
-        plan.variant().variant_dir(),
-    )?;
-    let mise_toml = workspace.initialize_variant(plan.variant(), plan.runtime_pins())?;
-    mise.trust_config(&mise_toml)?;
-
-    let discovered = discover_commands(mise, workspace, &plan)?;
-    let finalized = workspace.finalize_install(&plan, discovered);
+    let commands = match install_mode {
+        InstallMode::Isolated => install_isolated(mise, workspace, &exact_spec, &plan)?,
+        InstallMode::Global => install_global(mise, workspace, &exact_spec, &plan)?,
+    };
+    let finalized = workspace.finalize_install(&plan, install_mode, commands);
     let exported_commands = with_new_tool_cleanup(workspace, &plan, finalized)?;
 
     Ok(Ok(Success {
@@ -109,11 +105,28 @@ pub fn execute(
     }))
 }
 
-fn discover_commands(
+fn install_isolated(
     mise: &impl Mise,
     workspace: &Workspace,
+    exact_spec: &ToolSpec,
     plan: &InstallPlan,
 ) -> Result<BTreeMap<String, PathBuf>, Error> {
+    with_new_tool_cleanup(
+        workspace,
+        plan,
+        mise.install_into(
+            plan.runtime_pins(),
+            exact_spec,
+            plan.variant().variant_dir(),
+        ),
+    )?;
+    let mise_toml = with_new_tool_cleanup(
+        workspace,
+        plan,
+        workspace.initialize_variant(plan.variant(), plan.runtime_pins()),
+    )?;
+    with_new_tool_cleanup(workspace, plan, mise.trust_config(&mise_toml))?;
+
     let bin_paths = with_new_tool_cleanup(
         workspace,
         plan,
@@ -121,4 +134,29 @@ fn discover_commands(
     )?;
 
     with_new_tool_cleanup(workspace, plan, workspace.discover_executables(&bin_paths))
+}
+
+fn install_global(
+    mise: &impl Mise,
+    workspace: &Workspace,
+    exact_spec: &ToolSpec,
+    plan: &InstallPlan,
+) -> Result<BTreeMap<String, PathBuf>, Error> {
+    let mise_toml = with_new_tool_cleanup(
+        workspace,
+        plan,
+        workspace.initialize_variant(plan.variant(), plan.runtime_pins()),
+    )?;
+    with_new_tool_cleanup(workspace, plan, mise.trust_config(&mise_toml))?;
+    with_new_tool_cleanup(
+        workspace,
+        plan,
+        mise.install_global(exact_spec, plan.variant().variant_dir()),
+    )?;
+
+    with_new_tool_cleanup(
+        workspace,
+        plan,
+        mise.installed_command_targets(exact_spec, plan.variant().variant_dir()),
+    )
 }

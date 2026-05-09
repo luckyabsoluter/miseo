@@ -261,13 +261,13 @@ mod tests {
         let tmp = tempdir().unwrap();
         let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
 
-        let target = root.join("target-bin");
-        fs::write(target.as_std_path(), "echo hi").unwrap();
+        let target = root.join("global-bin/target-bin");
         let shim = root.join("shim");
         UnixFs.write_mise_env_shim(&root, &target, &shim).unwrap();
 
         let content = fs::read_to_string(shim.as_std_path()).unwrap();
         assert!(content.starts_with("#!/bin/sh\neval \"$(mise env -C '"));
+        assert!(content.contains("global-bin/target-bin' \"$@\""));
 
         let mode = {
             fs::metadata(shim.as_std_path())

@@ -16,6 +16,7 @@ Add `~/.miseo/.bin` to your `$PATH`.
 
 ```bash
 miseo install npm:http-server
+miseo install -g npm:http-server
 miseo install npm:http-server --use node@22
 miseo upgrade npm:http-server
 miseo upgrade npm:http-server --use node@22
@@ -50,9 +51,11 @@ miseo install npm:http-server
 
 Under the hood, `miseo` creates a dedicated tool root at `~/.miseo/npm-http-server` and tracks it in a `miseo`-owned manifest (`~/.miseo/.miseo-installs.toml`).
 
-Each installed target goes into a versioned runtime-scoped directory, typically:
+Each installed target gets a versioned runtime-scoped directory, typically:
 
 - `~/.miseo/npm-http-server/14.1.1+node-22.13.1`
+
+By default, package content is installed directly into that variant directory with `mise install-into`. When `-g`/`--global` is provided, npm packages are instead installed with `npm install -g` inside the activated variant environment.
 
 Then `miseo` links the shim from `~/.miseo/.bin` to the currently active install:
 
@@ -79,15 +82,25 @@ When that is present and `mise activate` is used, mise adds the local `node_modu
 
 If I find myself really missing the intelligent shims from Volta, maybe I'll revisit this design.
 
-## Backend agnostic
+## Install strategy
 
-While we mostly discussed `miseo` in the context of NPM packages so far, just like `mise` and unlike Volta, `miseo` does not hardcode ecosystem-specific knowledge. It simply delegates to a few key `mise` commands so the pattern can be generalized to any backend.
+The default path uses `mise install-into`, keeping package content under the versioned variant directory:
 
-That said, the pattern provided by `miseo` is most useful when used with backends that installs global tools with a "floating" runtime, like NPM.
+```bash
+mise exec --cd / node@22.13.1 -- \
+  mise install-into npm:http-server@14.1.1 ~/.miseo/npm-http-server/14.1.1+node-22.13.1
+```
 
-For backends like Cargo, since you are only compiling from source _once_ at installation time against your then-current Rust toolchain, the runtime behavior is locked in at that point and baked into the compiled binary, so `miseo install` may not add much value compared to `mise use -g`, though it also shouldn't harm anything. It does, however, provide a convenient way to use a different version of the tool than your global default version, which can come in handy when running into compatibility issues.
+For npm packages that need the runtime's normal global install layout, use `-g`:
 
-It's worth mentioning that `miseo` does not conflict with `mise use -g`, so you can mix usages if the latter works better in certain scenarios, though I'd be curious to hear about the problems you ran into.
+```bash
+miseo install -g npm:http-server
+
+mise exec --cd ~/.miseo/npm-http-server/14.1.1+node-22.13.1 -- \
+  npm install -g http-server@14.1.1
+```
+
+In global mode, the generated command wrapper activates the same per-tool `mise.toml` and invokes the absolute path to the executable created in that runtime's global npm bin directory.
 
 ## Limitations and trade-offs
 

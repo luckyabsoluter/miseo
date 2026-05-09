@@ -30,6 +30,31 @@ pub struct InstallRecord {
     pub commands: Vec<String>,
     /// Previously owned command names no longer exported.
     pub stale_commands: Vec<String>,
+    /// How package content was installed for this variant.
+    pub install_mode: InstallMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallMode {
+    Isolated,
+    Global,
+}
+
+impl InstallMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Isolated => "isolated",
+            Self::Global => "global",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, Error> {
+        match value {
+            "isolated" => Ok(Self::Isolated),
+            "global" => Ok(Self::Global),
+            _ => Err(invariant!("unknown install mode '{value}'")),
+        }
+    }
 }
 
 /// Result of removing a managed tool from workspace state.
@@ -269,6 +294,7 @@ impl Workspace {
     pub fn finalize_install(
         &mut self,
         plan: &InstallPlan,
+        install_mode: InstallMode,
         discovered: BTreeMap<String, PathBuf>,
     ) -> Result<Vec<String>, Error> {
         let exported_commands = discovered.keys().cloned().collect::<Vec<_>>();
@@ -300,6 +326,7 @@ impl Workspace {
             install_dir: plan.variant().variant_dir().to_path_buf(),
             commands: exported_commands.clone(),
             stale_commands,
+            install_mode,
         });
 
         Ok(exported_commands)
@@ -463,6 +490,26 @@ impl Workspace {
         Ok(removed.into_iter().map(|variant| variant.key).collect())
     }
 
+    pub fn current_install_mode(&self, tool_id: &ToolId) -> Result<InstallMode, Error> {
+        let current = self.current_variant(tool_id)?;
+        InstallMode::parse(&current.install_mode)
+    }
+
+    pub fn global_uninstall_project_dirs(&self, tool_id: &ToolId) -> Result<Vec<PathBuf>, Error> {
+        let Some(tool) = self.manifest.tool_by_id(tool_id) else {
+            return Ok(vec![]);
+        };
+
+        let mut dirs = vec![];
+        for variant in tool.variants.values() {
+            if InstallMode::parse(&variant.install_mode)? == InstallMode::Global {
+                dirs.push(PathBuf::from(variant.install_dir.clone()));
+            }
+        }
+
+        Ok(dirs)
+    }
+
     fn untrack(&mut self, tool_id: &ToolId) -> Option<RemovedTool> {
         let removed_commands = self.manifest.owned_commands_by_id(tool_id);
         let tool = self.manifest.remove_tool_by_id(tool_id)?;
@@ -506,6 +553,7 @@ impl Workspace {
             runtimes,
             install_dir: record.install_dir.to_string(),
             commands: record.commands,
+            install_mode: record.install_mode.as_str().to_string(),
         };
 
         self.mark_dirty();
@@ -611,7 +659,7 @@ mod tests {
         spec::{Runtime, RuntimePins, RuntimeSpec, ToolId, ToolSpec},
     };
 
-    use super::{InstallRecord, Workspace, manifest::Manifest};
+    use super::{InstallMode, InstallRecord, Workspace, manifest::Manifest};
 
     struct TestWorkspace {
         root: PathBuf,
@@ -685,6 +733,7 @@ mod tests {
             install_dir: root.join("npm-prettier").join(&variant_key),
             commands: commands.into_iter().map(str::to_string).collect(),
             stale_commands: vec![],
+            install_mode: InstallMode::Isolated,
         }
     }
 

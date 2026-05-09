@@ -17,7 +17,8 @@ Core idea:
 - Keep global tools stable until explicitly upgraded.
 - Keep behavior explicit and inspectable on disk.
 - Keep command resolution PATH-native.
-- Reuse `mise` for backend installation/runtime resolution instead of reimplementing backends.
+- Reuse `mise` for runtime resolution, activation, and default package installation.
+- Allow npm global installs explicitly when requested with `install -g`.
 
 ## Non-Goals
 
@@ -26,7 +27,7 @@ Core idea:
 
 ## Behavioral Guarantees
 
-- Every managed tool is isolated in its own directory.
+- Every managed tool has an isolated directory for runtime pins, wrappers, and metadata.
 - Every managed tool has an explicit runtime pin.
 - Public commands in `~/.miseo/.bin` point to a specific owning tool directory.
 - `miseo` does not intercept shell resolution; precedence is decided by PATH order.
@@ -34,6 +35,7 @@ Core idea:
 ## Command Surface
 
 - `miseo install <tool-spec>`
+- `miseo install -g <tool-spec>`
 - `miseo install <tool-spec> --use <runtime@selector>` (repeatable)
 - `miseo upgrade <tool-spec>`
 - `miseo upgrade <tool-spec> --use <runtime@selector>` (repeatable)
@@ -99,21 +101,12 @@ Layout example:
   .miseo-installs.toml
   .bin/
     http-server -> ~/.miseo/npm-http-server/current/.miseo/http-server
-    rg -> ~/.miseo/cargo-ripgrep/current/.miseo/rg
   npm-http-server/
     current -> 14.1.1+node-22.13.1
     14.1.1+node-22.13.1/
       mise.toml
-      <backend-managed install tree>
       .miseo/
         http-server
-  cargo-ripgrep/
-    current -> 14.1.1+rust-1.84.0
-    14.1.1+rust-1.84.0/
-      mise.toml
-      <backend-managed install tree>
-      .miseo/
-        rg
 ```
 
 Ownership model:
@@ -150,7 +143,7 @@ If no global runtime is configured for that runtime, installation fails with a c
 - `miseo` resolves `--use` selectors to concrete versions and persists those concrete pins in the tool-local `mise.toml`
 - if `--use` is explicitly provided (Mode B), installing requested runtime(s) if missing is allowed
 
-Backend-to-runtime mapping used by `miseo`:
+Backend-to-runtime mapping used by `miseo` for runtime selection:
 
 | Backend                                                                                   | Runtime set    | Pinning mode                                                         |
 | ----------------------------------------------------------------------------------------- | -------------- | -------------------------------------------------------------------- |
@@ -161,32 +154,51 @@ Backend-to-runtime mapping used by `miseo`:
 | `go`                                                                                      | `go`           | pinned toolchain (mostly build-time relevance for produced binaries) |
 | `aqua`, `github`, `gitlab`, `http`, `ubi`, `s3`, `spm`, `dotnet`, `conda`, `asdf`, `vfox` | unmapped in v1 | `--use` required; otherwise install/upgrade fails                    |
 
+The concrete global install implementation currently supports npm packages.
+
 ## Integration with mise
 
-`miseo` uses `mise` as installer/executor while keeping `miseo` state under `~/.miseo`.
+`miseo` uses `mise` as the runtime resolver/executor while keeping `miseo` state under `~/.miseo`.
 
-Primary install shape:
+Default install shape:
 
 ```bash
-mise exec <runtime@version> -- mise install-into <tool-spec@exact-version> <tool-dir>
+mise exec <runtime@version> -- mise install-into <tool-spec@exact-version> <variant-dir>
 ```
 
-This keeps runtime selection explicit and avoids mutating user global `mise` tool config.
+Global npm install shape, only when `install -g` is requested:
+
+```bash
+mise exec --cd ~/.miseo/<tool-key>/<variant> -- npm install -g <package>@<exact-version>
+```
+
+The tool-local directory contains a generated `mise.toml` with exact runtime pins before npm runs in global mode, so the npm global install lands in the activated runtime's global package location instead of relying on the caller's current project.
 
 Package version resolution policy:
 
 1. Resolve package target to an exact version before install.
-2. Use the resolved exact spec for `install-into` and post-install bin discovery.
+2. Use the resolved exact spec for `install-into` by default.
+3. In global npm mode, strip the `npm:` backend prefix and pass the resolved package spec to `npm install -g`.
 
 ## Bin Discovery Contract
 
-After install, `miseo` determines exported command names by asking `mise` for backend-resolved bin directories for the installed path:
+Default installs determine exported commands by asking `mise` for backend-resolved bin directories for the installed path:
 
 ```bash
 mise --no-config bin-paths "<tool-spec>@path:<absolute-install-dir>"
 ```
 
 Then `miseo` scans only those returned directories and uses executable file names as command names.
+
+Global npm installs determine exported command names from the installed package metadata. They ask npm for the activated global package root:
+
+```bash
+mise exec --cd ~/.miseo/<tool-key>/<variant> -- npm root -g
+```
+
+Then `miseo` reads the installed package's `package.json` and uses the `bin` field to determine command names. Object-form `bin` keys are used directly. String-form `bin` exports the unscoped package name.
+
+`miseo` also asks npm for the activated global prefix and turns each command name into an absolute executable path in that runtime's global npm bin directory. Shims execute that absolute global path after activating the tool-local `mise.toml`.
 
 This contract is important because command names are not always equal to package names, and packages may export multiple binaries.
 
@@ -198,9 +210,9 @@ Install flow:
 2. Resolve runtime pin set (from `--use` or global runtime policy).
 3. Resolve exact package version.
 4. Compute install target `~/.miseo/<tool-key>/<pkg-version>+<runtime-tuple>`.
-5. Install directly into that final target via `mise exec ... install-into ...`.
+5. Install via `mise exec ... mise install-into ...` by default, or initialize/trust the variant and run `npm install -g` when `-g` was requested.
 6. Persist/verify tool-local runtime pins.
-7. Discover exported command names via bin discovery contract.
+7. Discover exported command names via the selected install mode's bin discovery contract.
 8. Validate conflicts (only against bins owned by other `tool_id`s).
 9. Atomically upgrade `current` pointer.
 10. Create/upgrade `~/.miseo/.bin` symlinks for current exported commands.
@@ -211,7 +223,7 @@ Upgrade flow:
 
 1. Resolve tool from `~/.miseo/.miseo-installs.toml`.
 2. Choose package/runtime target (preserve pin unless explicit repin/upgrade intent).
-3. Install into a new final versioned directory.
+3. Install the new variant using the current variant's install mode.
 4. Rediscover commands and validate conflicts against other owners.
 5. Atomically switch `current`.
 6. Refresh public symlinks (including stale-bin removal) and manifest metadata.
@@ -219,8 +231,9 @@ Upgrade flow:
 Uninstall flow:
 
 1. Resolve tool from `~/.miseo/.miseo-installs.toml`.
-2. Remove public symlinks that target it.
-3. Remove tool dir and manifest entry.
+2. For each recorded global npm variant, activate its tool-local `mise.toml` and run `npm uninstall -g <package>`.
+3. Remove public symlinks that target it.
+4. Remove tool dir and manifest entry.
 
 Uninstall `--force` behavior:
 
@@ -257,7 +270,8 @@ Default behavior:
 
 ## Atomicity and Crash Behavior
 
-- Install content write is isolated by variant directory (`~/.miseo/<tool-key>/<install-variant>`), so incomplete installs do not replace active variant.
+- Tool metadata and wrappers are isolated by variant directory (`~/.miseo/<tool-key>/<install-variant>`), so incomplete installs do not replace the active `miseo` variant.
+- Default package content write is isolated by variant directory. Global npm mode installs package content into the activated runtime's global npm location.
 - User-visible activation is controlled by pointer/symlink updates (`current` and `~/.miseo/.bin/*`).
 - `current` switch is atomic (single rename/symlink replacement operation).
 - Public bin updates are per-command operations; a crash mid-update can leave partial bin state temporarily.

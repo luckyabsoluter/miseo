@@ -22,6 +22,10 @@ pub struct Install {
     /// Reinstall even if the current installed variant already matches.
     #[arg(short = 'f', long = "force")]
     pub force: bool,
+
+    /// Install through the runtime's global package manager instead of isolated install-into.
+    #[arg(short = 'g', long = "global")]
+    pub global: bool,
 }
 
 impl Command for Install {
@@ -39,6 +43,11 @@ impl Command for Install {
             tool_spec.clone(),
             self.uses.try_into()?,
             self.force,
+            if self.global {
+                crate::workspace::InstallMode::Global
+            } else {
+                crate::workspace::InstallMode::Isolated
+            },
         )? {
             Ok(success) => ui.install_success(&success),
             Err(already_current) => {
@@ -79,6 +88,14 @@ mod tests {
         assert_eq!(args.tool_spec.to_string(), "npm:prettier");
         assert!(args.uses.is_empty());
         assert!(args.force);
+        assert!(!args.global);
+    }
+
+    #[test]
+    fn parses_install_global() {
+        let args = command("miseo install -g npm:prettier");
+        assert_eq!(args.tool_spec.to_string(), "npm:prettier");
+        assert!(args.global);
     }
 
     #[test]
@@ -146,6 +163,27 @@ mod tests {
         );
         assert_eq!(manifest.variant_count_str("npm:prettier"), 1);
         assert_eq!(manifest.command_owner_str("prettier"), Some("npm:prettier"));
+        assert_eq!(
+            manifest.current_install_mode_str("npm:prettier"),
+            Some("isolated")
+        );
+    }
+
+    #[test]
+    fn install_global_records_global_mode() {
+        let mut test = TestApp::new();
+
+        test.mise_mut()
+            .use_g(Runtime::Node, "24", "24.13.1")
+            .register_package("npm:prettier", "3.8.1", ["prettier"]);
+
+        test.run(command("miseo install -g npm:prettier")).unwrap();
+
+        let manifest = test.manifest();
+        assert_eq!(
+            manifest.current_install_mode_str("npm:prettier"),
+            Some("global")
+        );
     }
 
     #[test]
@@ -329,13 +367,13 @@ mod tests {
         let mut test = TestApp::new();
 
         test.mise_mut()
-            .use_g(Runtime::Ruby, "4.0", "4.0.1")
-            .register_package("gem:rack", "3.1.0", [""; 0]);
+            .use_g(Runtime::Node, "24", "24.13.1")
+            .register_package("npm:no-bin", "1.0.0", [""; 0]);
 
-        let err = test.run(command("miseo install gem:rack")).unwrap_err();
+        let err = test.run(command("miseo install npm:no-bin")).unwrap_err();
 
         assert!(matches!(err, Error::ManifestInvariant(_)));
-        assert!(!test.fs().exists(&test.path("gem-rack")).unwrap());
+        assert!(!test.fs().exists(&test.path("npm-no-bin")).unwrap());
         let manifest = test.manifest();
         assert!(manifest.tools_is_empty());
         assert!(manifest.owners_is_empty());

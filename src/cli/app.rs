@@ -152,6 +152,10 @@ impl TestApp {
         &mut self.app.mise
     }
 
+    pub fn mise(&self) -> &mise::Test {
+        &self.app.mise
+    }
+
     pub fn out(&self) -> &output::Test {
         &self.app.out
     }
@@ -236,6 +240,7 @@ mod tests {
             install_dir: workspace.root().join("npm-prettier/3.8.1+node-24.13.1"),
             commands: vec!["prettier".to_string()],
             stale_commands: vec![],
+            install_mode: crate::workspace::InstallMode::Isolated,
         });
     }
 

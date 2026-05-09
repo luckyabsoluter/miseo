@@ -11,6 +11,8 @@ use crate::{
     spec::ToolId,
 };
 
+use super::InstallMode;
+
 pub const SCHEMA_VERSION: u64 = 1;
 
 /// Serialized workspace manifest (`~/.miseo/.miseo-installs.toml`).
@@ -39,6 +41,8 @@ pub(super) struct VariantEntry {
     pub(super) runtimes: IndexMap<String, String>,
     pub(super) install_dir: String,
     pub(super) commands: Vec<String>,
+    #[serde(default = "default_install_mode")]
+    pub(super) install_mode: String,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +184,14 @@ impl Manifest {
         self.owners.get(command).map(String::as_str)
     }
 
+    #[cfg(test)]
+    pub(crate) fn current_install_mode_str(&self, tool_id: &str) -> Option<&str> {
+        self.tools
+            .get(tool_id)
+            .and_then(|tool| tool.variants.get(&tool.current_variant))
+            .map(|variant| variant.install_mode.as_str())
+    }
+
     fn current_commands_str(&self, tool_id: &str) -> Vec<String> {
         self.tools
             .get(tool_id)
@@ -247,6 +259,10 @@ impl Manifest {
 
     fn validate_tools(&self) -> Result<(), Error> {
         for (tool_id, tool) in &self.tools {
+            for variant in tool.variants.values() {
+                InstallMode::parse(&variant.install_mode)?;
+            }
+
             if tool.variants.contains_key(&tool.current_variant) {
                 continue;
             }
@@ -333,6 +349,10 @@ impl Manifest {
     }
 }
 
+fn default_install_mode() -> String {
+    InstallMode::Isolated.as_str().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use indexmap::IndexMap;
@@ -350,6 +370,7 @@ mod tests {
             runtimes,
             install_dir: "/tmp/install".to_string(),
             commands: commands.into_iter().map(ToString::to_string).collect(),
+            install_mode: InstallMode::Isolated.as_str().to_string(),
         }
     }
 

@@ -1,13 +1,13 @@
 //! Host `mise` integration backed by subprocess calls.
 
-use std::process::Command;
+use std::{collections::BTreeMap, fs, process::Command};
 
 use serde::Deserialize;
 
 use crate::{
     error::{Error, invariant},
     fs::{Path, PathBuf},
-    spec::{Runtime, RuntimePins, RuntimeSpec, ToolId, ToolSpec},
+    spec::{Backend, Runtime, RuntimePins, RuntimeSpec, ToolId, ToolSpec},
 };
 
 use super::Mise;
@@ -132,6 +132,61 @@ fn install_into_args(
     args
 }
 
+fn npm_install_global_args(tool_spec: &ToolSpec, project_dir: &Path) -> Result<Vec<String>, Error> {
+    let package = npm_package_arg(tool_spec)?;
+    let mut args = vec![
+        "exec".to_string(),
+        "--cd".to_string(),
+        project_dir.to_string(),
+    ];
+
+    args.push("--".to_string());
+    args.push("npm".to_string());
+    args.push("install".to_string());
+    args.push("-g".to_string());
+    args.push(package);
+
+    Ok(args)
+}
+
+fn npm_root_global_args(project_dir: &Path) -> Vec<String> {
+    vec![
+        "exec".to_string(),
+        "--cd".to_string(),
+        project_dir.to_string(),
+        "--".to_string(),
+        "npm".to_string(),
+        "root".to_string(),
+        "-g".to_string(),
+    ]
+}
+
+fn npm_prefix_global_args(project_dir: &Path) -> Vec<String> {
+    vec![
+        "exec".to_string(),
+        "--cd".to_string(),
+        project_dir.to_string(),
+        "--".to_string(),
+        "npm".to_string(),
+        "prefix".to_string(),
+        "-g".to_string(),
+    ]
+}
+
+fn npm_uninstall_global_args(tool_id: &ToolId, project_dir: &Path) -> Result<Vec<String>, Error> {
+    let package = npm_package_name(tool_id)?;
+    Ok(vec![
+        "exec".to_string(),
+        "--cd".to_string(),
+        project_dir.to_string(),
+        "--".to_string(),
+        "npm".to_string(),
+        "uninstall".to_string(),
+        "-g".to_string(),
+        package,
+    ])
+}
+
 fn latest_args(runtime_versions: &RuntimePins, tool_spec: &ToolSpec) -> Vec<String> {
     let mut args = vec![
         "exec".to_string(),
@@ -153,12 +208,96 @@ fn latest_args(runtime_versions: &RuntimePins, tool_spec: &ToolSpec) -> Vec<Stri
     args
 }
 
+fn npm_package_arg(tool_spec: &ToolSpec) -> Result<String, Error> {
+    let Some(version) = tool_spec.version() else {
+        return Err(invariant!(
+            "npm global install requires exact tool spec, got '{tool_spec}'"
+        ));
+    };
+
+    Ok(format!(
+        "{}@{version}",
+        npm_package_name(tool_spec.tool_id())?
+    ))
+}
+
+fn npm_package_name(tool_id: &ToolId) -> Result<String, Error> {
+    if tool_id.backend() != &Backend::Npm {
+        return Err(invariant!(
+            "global npm package operation requires npm backend, got '{tool_id}'"
+        ));
+    }
+
+    Ok(tool_id.name().to_string())
+}
+
 fn require_non_empty(value: String, context: &str) -> Result<String, Error> {
     if value.is_empty() {
         return Err(invariant!("{context} returned empty output"));
     }
 
     Ok(value)
+}
+
+fn npm_package_json_path(root: String, tool_spec: &ToolSpec) -> Result<PathBuf, Error> {
+    let root = require_non_empty(root, "npm root -g")?;
+    Ok(PathBuf::from(root)
+        .join(tool_spec.tool_id().name())
+        .join("package.json"))
+}
+
+fn npm_package_commands(package_json: &str) -> Result<Vec<String>, Error> {
+    let package: NpmPackageJson = serde_json::from_str(package_json)?;
+    Ok(commands_from_package_json(package))
+}
+
+fn npm_global_bin_dir(prefix: String) -> Result<PathBuf, Error> {
+    let prefix = PathBuf::from(require_non_empty(prefix, "npm prefix -g")?);
+
+    #[cfg(windows)]
+    {
+        Ok(prefix)
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(prefix.join("bin"))
+    }
+}
+
+fn npm_command_targets(bin_dir: &Path, commands: Vec<String>) -> BTreeMap<String, PathBuf> {
+    commands
+        .into_iter()
+        .filter(|command| !command.is_empty())
+        .map(|command| {
+            let target = bin_dir.join(&command);
+            (command, target)
+        })
+        .collect()
+}
+
+fn commands_from_package_json(package: NpmPackageJson) -> Vec<String> {
+    match package.bin {
+        Some(NpmBin::Command(path)) if !path.is_empty() => package
+            .name
+            .as_deref()
+            .map(default_npm_bin_name)
+            .filter(|name| !name.is_empty())
+            .map(|name| vec![name.to_string()])
+            .unwrap_or_default(),
+        Some(NpmBin::Commands(commands)) => commands
+            .into_keys()
+            .filter(|command| !command.is_empty())
+            .collect(),
+        _ => vec![],
+    }
+}
+
+fn default_npm_bin_name(package_name: &str) -> &str {
+    package_name
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(package_name)
 }
 
 fn latest_tool_spec(requested: &ToolSpec, version: String) -> Result<ToolSpec, Error> {
@@ -254,6 +393,11 @@ impl Mise for Cli {
         runtime_spec_from_install_path(runtime, install_path, "mise where")
     }
 
+    fn install_global(&self, tool_spec: &ToolSpec, project_dir: &Path) -> Result<(), Error> {
+        let args = npm_install_global_args(tool_spec, project_dir)?;
+        self.run_status(&args, self.interactive)
+    }
+
     fn install_into(
         &self,
         runtime_versions: &RuntimePins,
@@ -261,6 +405,39 @@ impl Mise for Cli {
         target_dir: &Path,
     ) -> Result<(), Error> {
         let args = install_into_args(runtime_versions, tool_spec, target_dir);
+        self.run_status(&args, self.interactive)
+    }
+
+    fn installed_command_targets(
+        &self,
+        tool_spec: &ToolSpec,
+        project_dir: &Path,
+    ) -> Result<BTreeMap<String, PathBuf>, Error> {
+        if tool_spec.backend() != &Backend::Npm {
+            return Err(invariant!(
+                "global command discovery currently supports npm packages, got '{tool_spec}'"
+            ));
+        }
+
+        let args = npm_root_global_args(project_dir);
+        let root = self.run_capture_owned(&args)?;
+        let package_json_path = npm_package_json_path(root, tool_spec)?;
+        let package_json = fs::read_to_string(package_json_path.as_std_path())?;
+        let commands = npm_package_commands(&package_json)?;
+
+        let args = npm_prefix_global_args(project_dir);
+        let prefix = self.run_capture_owned(&args)?;
+        let bin_dir = npm_global_bin_dir(prefix)?;
+
+        Ok(npm_command_targets(&bin_dir, commands))
+    }
+
+    fn uninstall_global(&self, tool_id: &ToolId, project_dir: &Path) -> Result<(), Error> {
+        if tool_id.backend() != &Backend::Npm {
+            return Ok(());
+        }
+
+        let args = npm_uninstall_global_args(tool_id, project_dir)?;
         self.run_status(&args, self.interactive)
     }
 
@@ -286,23 +463,36 @@ struct LsEntry {
     requested_version: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct NpmPackageJson {
+    name: Option<String>,
+    bin: Option<NpmBin>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum NpmBin {
+    Command(String),
+    Commands(BTreeMap<String, String>),
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::spec::{Runtime, RuntimePins, RuntimeSpec, ToolSpec};
+    use crate::spec::{Runtime, RuntimePins, RuntimeSpec, ToolId, ToolSpec};
 
     use super::*;
 
     #[test]
     fn ensure_success_returns_mise_command_failed_error() {
         let err = ensure_success(
-            "install-into npm:prettier".to_string(),
+            "exec -- npm install -g prettier@3.8.1".to_string(),
             false,
             "boom".to_string(),
         )
         .unwrap_err();
         match err {
             Error::MiseCommandFailed { command, stderr } => {
-                assert_eq!(command, "mise install-into npm:prettier");
+                assert_eq!(command, "mise exec -- npm install -g prettier@3.8.1");
                 assert_eq!(stderr, "boom");
             }
             _ => panic!("expected mise command failure"),
@@ -327,6 +517,27 @@ mod tests {
     fn parse_ls_entries_invalid_json_returns_json_error() {
         let err = parse_ls_entries("{").unwrap_err();
         assert!(matches!(err, Error::Json(_)));
+    }
+
+    #[test]
+    fn npm_install_global_args_builds_expected_exec_command() {
+        let spec: ToolSpec = "npm:prettier@3.8.1".parse().unwrap();
+        let project_dir = PathBuf::from("/tmp/miseo/npm-prettier/3.8.1+node-24.13.1");
+
+        let args = npm_install_global_args(&spec, &project_dir).unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "--cd",
+                "/tmp/miseo/npm-prettier/3.8.1+node-24.13.1",
+                "--",
+                "npm",
+                "install",
+                "-g",
+                "prettier@3.8.1",
+            ]
+        );
     }
 
     #[test]
@@ -363,6 +574,35 @@ mod tests {
     }
 
     #[test]
+    fn npm_package_arg_strips_backend_and_preserves_scope() {
+        let spec: ToolSpec = "npm:@openai/codex@1.2.3".parse().unwrap();
+
+        assert_eq!(npm_package_arg(&spec).unwrap(), "@openai/codex@1.2.3");
+    }
+
+    #[test]
+    fn npm_uninstall_global_args_builds_expected_exec_command() {
+        let tool_id: ToolId = "npm:@openai/codex".parse().unwrap();
+        let project_dir = PathBuf::from("/tmp/miseo/npm-openai-codex/1.2.3+node-24.13.1");
+
+        let args = npm_uninstall_global_args(&tool_id, &project_dir).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "--cd",
+                "/tmp/miseo/npm-openai-codex/1.2.3+node-24.13.1",
+                "--",
+                "npm",
+                "uninstall",
+                "-g",
+                "@openai/codex",
+            ]
+        );
+    }
+
+    #[test]
     fn latest_args_builds_expected_exec_command() {
         let mut runtime_versions = RuntimePins::new();
         runtime_versions.insert(
@@ -387,6 +627,34 @@ mod tests {
                 "--cd",
                 neutral_cd(),
             ]
+        );
+    }
+
+    #[test]
+    fn npm_package_commands_reads_object_bins() {
+        let commands =
+            npm_package_commands(r#"{"name":"pkg","bin":{"foo":"bin/foo.js","bar":"bin/bar.js"}}"#)
+                .unwrap();
+
+        assert_eq!(commands, vec!["bar".to_string(), "foo".to_string()]);
+    }
+
+    #[test]
+    fn npm_package_commands_uses_unscoped_name_for_string_bin() {
+        let commands =
+            npm_package_commands(r#"{"name":"@openai/codex","bin":"bin/codex.js"}"#).unwrap();
+
+        assert_eq!(commands, vec!["codex".to_string()]);
+    }
+
+    #[test]
+    fn npm_command_targets_uses_global_bin_absolute_paths() {
+        let bin_dir = PathBuf::from("/tmp/mise/installs/node/24.13.1/bin");
+        let targets = npm_command_targets(&bin_dir, vec!["codex".to_string()]);
+
+        assert_eq!(
+            targets.get("codex"),
+            Some(&PathBuf::from("/tmp/mise/installs/node/24.13.1/bin/codex"))
         );
     }
 

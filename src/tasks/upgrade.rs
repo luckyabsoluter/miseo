@@ -36,8 +36,16 @@ pub fn execute(
     uses: RuntimePins,
 ) -> Result<Outcome, Error> {
     let uses = workspace.upgrade_uses(&tool_id, uses)?;
+    let install_mode = workspace.current_install_mode(&tool_id)?;
 
-    let install_outcome = install::execute(mise, workspace, tool_id.clone().into(), uses, false)?;
+    let install_outcome = install::execute(
+        mise,
+        workspace,
+        tool_id.clone().into(),
+        uses,
+        false,
+        install_mode,
+    )?;
 
     match install_outcome {
         Ok(success) => {

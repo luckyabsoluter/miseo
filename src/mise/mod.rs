@@ -1,5 +1,7 @@
 //! `mise` integration trait plus host/test implementations.
 
+use std::collections::BTreeMap;
+
 use crate::{
     error::Error,
     fs::{Path, PathBuf},
@@ -41,6 +43,9 @@ pub trait Mise {
         }
     }
 
+    /// Install an exact tool globally under the tool-local activated mise environment.
+    fn install_global(&self, tool_spec: &ToolSpec, project_dir: &Path) -> Result<(), Error>;
+
     /// Install an exact tool into `target_dir` under the provided runtime selections.
     fn install_into(
         &self,
@@ -49,8 +54,18 @@ pub trait Mise {
         target_dir: &Path,
     ) -> Result<(), Error>;
 
+    /// Return command names and global executable paths exported by the installed package.
+    fn installed_command_targets(
+        &self,
+        tool_spec: &ToolSpec,
+        project_dir: &Path,
+    ) -> Result<BTreeMap<String, PathBuf>, Error>;
+
     /// Return executable bin directories for the installed package at `install_dir`.
     fn bin_paths(&self, tool_id: &ToolId, install_dir: &Path) -> Result<Vec<PathBuf>, Error>;
+
+    /// Uninstall a global tool package under the tool-local activated mise environment.
+    fn uninstall_global(&self, tool_id: &ToolId, project_dir: &Path) -> Result<(), Error>;
 
     /// Trust a generated `mise.toml` so mise will evaluate it non-interactively.
     fn trust_config(&self, config_path: &Path) -> Result<(), Error>;

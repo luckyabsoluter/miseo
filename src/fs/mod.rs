@@ -48,7 +48,7 @@ pub trait Fs {
     #[cfg(test)]
     fn write_executable_file(&self, path: &Path, content: &str) -> Result<(), Error>;
 
-    /// Write an executable shim that activates the tool-local mise env then `exec`s `target`.
+    /// Write an executable shim that activates the tool-local mise env then executes `target`.
     fn write_mise_env_shim(
         &self,
         project_dir: &Path,

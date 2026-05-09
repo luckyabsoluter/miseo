@@ -1,7 +1,7 @@
 //! Test double for `mise` integration with programmable fake responses.
 
-use std::collections::HashMap;
-use std::fmt;
+use std::{cell::RefCell, collections::HashMap};
+use std::{collections::BTreeMap, fmt};
 
 use crate::{
     error::{Error, invariant},
@@ -13,12 +13,13 @@ use super::Mise;
 
 /// Test double for `Mise` with explicit per-call lookup maps.
 pub struct Test {
-    fs: &'static dyn Fs,
+    _fs: &'static dyn Fs,
     latest_versions: HashMap<String, String>,
     global_selector: HashMap<Runtime, String>,
     global_installed: HashMap<Runtime, bool>,
     selector_current: HashMap<(Runtime, String), String>,
     packages: HashMap<String, Package>,
+    global_uninstalls: RefCell<Vec<GlobalUninstall>>,
 }
 
 // `fs` is a trait object, so we derive doesn't work.
@@ -30,6 +31,7 @@ impl fmt::Debug for Test {
             .field("global_installed", &self.global_installed)
             .field("selector_current", &self.selector_current)
             .field("packages", &self.packages)
+            .field("global_uninstalls", &self.global_uninstalls)
             .finish()
     }
 }
@@ -43,12 +45,13 @@ impl Default for Test {
 impl Test {
     pub fn new(fs: &'static dyn Fs) -> Self {
         Self {
-            fs,
+            _fs: fs,
             latest_versions: HashMap::new(),
             global_selector: HashMap::new(),
             global_installed: HashMap::new(),
             selector_current: HashMap::new(),
             packages: HashMap::new(),
+            global_uninstalls: RefCell::new(vec![]),
         }
     }
 
@@ -128,11 +131,30 @@ impl Test {
 
         self
     }
+
+    pub fn global_uninstalls(&self) -> Vec<(String, String)> {
+        self.global_uninstalls
+            .borrow()
+            .iter()
+            .map(|uninstall| {
+                (
+                    uninstall.tool_id.to_string(),
+                    uninstall.project_dir.to_string(),
+                )
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 struct Package {
     bins: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GlobalUninstall {
+    tool_id: ToolId,
+    project_dir: PathBuf,
 }
 
 impl Mise for Test {
@@ -207,6 +229,10 @@ impl Mise for Test {
         Ok(RuntimeSpec::new(runtime.clone(), version))
     }
 
+    fn install_global(&self, _tool_spec: &ToolSpec, _project_dir: &Path) -> Result<(), Error> {
+        Ok(())
+    }
+
     fn install_into(
         &self,
         _runtime_versions: &RuntimePins,
@@ -218,14 +244,47 @@ impl Mise for Test {
         };
 
         let bin_dir = target_dir.join("bin");
-        self.fs.mkdir_p(&bin_dir)?;
+        self._fs.mkdir_p(&bin_dir)?;
 
         for bin in &package.bins {
             let path = bin_dir.join(bin);
-            self.fs
+            self._fs
                 .write_executable_file(&path, "#!/bin/sh\nexit 0\n")?;
         }
 
+        Ok(())
+    }
+
+    fn installed_command_targets(
+        &self,
+        tool_spec: &ToolSpec,
+        _project_dir: &Path,
+    ) -> Result<BTreeMap<String, PathBuf>, Error> {
+        let commands = self
+            .packages
+            .get(&tool_spec.to_string())
+            .map(|package| package.bins.clone())
+            .unwrap_or_default();
+
+        Ok(commands
+            .into_iter()
+            .filter(|command| !command.is_empty())
+            .map(|command| {
+                let target = _project_dir.join(".npm-global").join(&command);
+                (command, target)
+            })
+            .collect())
+    }
+
+    fn uninstall_global(&self, tool_id: &ToolId, project_dir: &Path) -> Result<(), Error> {
+        if tool_id.backend().as_ref() != "npm" {
+            return Ok(());
+        }
+
+        self.global_uninstalls.borrow_mut().push(GlobalUninstall {
+            tool_id: tool_id.clone(),
+            project_dir: project_dir.to_path_buf(),
+        });
         Ok(())
     }
 

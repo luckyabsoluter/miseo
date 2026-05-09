@@ -1,4 +1,4 @@
-use crate::{error::Error, spec::ToolId, workspace::Workspace};
+use crate::{error::Error, mise::Mise, spec::ToolId, workspace::Workspace};
 
 /// Successful uninstall details for UI rendering.
 #[derive(Debug, Clone)]
@@ -9,7 +9,16 @@ pub struct Outcome {
     pub removed_commands: Vec<String>,
 }
 
-pub fn execute(workspace: &mut Workspace, tool_id: ToolId, force: bool) -> Result<Outcome, Error> {
+pub fn execute(
+    mise: &impl Mise,
+    workspace: &mut Workspace,
+    tool_id: ToolId,
+    force: bool,
+) -> Result<Outcome, Error> {
+    for project_dir in workspace.global_uninstall_project_dirs(&tool_id)? {
+        mise.uninstall_global(&tool_id, &project_dir)?;
+    }
+
     let removed_commands = workspace.uninstall(&tool_id, force)?;
 
     Ok(Outcome {

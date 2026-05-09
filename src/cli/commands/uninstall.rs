@@ -16,10 +16,10 @@ impl Command for Uninstall {
     fn execute(
         self,
         workspace: &mut Workspace,
-        _mise: &impl Mise,
+        mise: &impl Mise,
         ui: &Ui<'_>,
     ) -> Result<(), Error> {
-        let outcome = tasks::uninstall::execute(workspace, self.tool_spec, self.force)?;
+        let outcome = tasks::uninstall::execute(mise, workspace, self.tool_spec, self.force)?;
         ui.uninstalled(&outcome);
         Ok(())
     }
@@ -89,6 +89,7 @@ mod tests {
         let fs = test.fs();
         assert!(!fs.exists(&test.path(".bin/prettier")).unwrap());
         assert!(!fs.exists(&test.path("npm-prettier")).unwrap());
+        assert!(test.mise().global_uninstalls().is_empty());
 
         test.out().assert_out(&[
             "miseo uninstalled npm:prettier",
@@ -98,6 +99,31 @@ mod tests {
         let loaded = test.manifest();
         assert!(loaded.tools_is_empty());
         assert!(loaded.owners_is_empty());
+    }
+
+    #[test]
+    fn uninstall_global_install_runs_npm_uninstall() {
+        let mut test = TestApp::new();
+
+        test.mise_mut()
+            .use_g(Runtime::Node, "24", "24.13.1")
+            .register_package("npm:prettier", "3.8.1", ["prettier"]);
+
+        test.run(cli_command("miseo install -g npm:prettier"))
+            .unwrap();
+        test.out().clear();
+
+        test.run(command("miseo uninstall npm:prettier")).unwrap();
+
+        assert_eq!(
+            test.mise().global_uninstalls(),
+            vec![(
+                "npm:prettier".to_string(),
+                test.path("npm-prettier")
+                    .join("3.8.1+node-24.13.1")
+                    .to_string()
+            )]
+        );
     }
 
     #[test]
