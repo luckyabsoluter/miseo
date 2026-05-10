@@ -120,7 +120,7 @@ mod tests {
             vec![(
                 "npm:prettier".to_string(),
                 test.path("npm-prettier")
-                    .join("3.8.1+node-24.13.1")
+                    .join("global+node-24.13.1")
                     .to_string()
             )]
         );

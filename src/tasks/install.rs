@@ -68,12 +68,13 @@ pub fn execute(
 
     let requested = tool_spec.or_latest();
     let exact_spec = mise.resolve_latest_version(&runtime_pins, &requested)?;
-    let plan = workspace.plan_install(&exact_spec, &runtime_pins)?;
+    let plan = workspace.plan_install(&exact_spec, &runtime_pins, install_mode)?;
 
     let tool_id = plan.tool_id().clone();
     let runtime_labels = plan.runtime_labels();
+    let current_matches = install_current_matches(mise, &plan, install_mode)?;
 
-    if plan.current_matches() && !force {
+    if current_matches && !force {
         return Ok(Err(AlreadyCurrent {
             tool_id,
             package_version: plan.package_version().to_string(),
@@ -81,7 +82,7 @@ pub fn execute(
         }));
     }
 
-    let action = if plan.current_matches() {
+    let action = if current_matches {
         Action::Reinstalled
     } else {
         Action::Installed
@@ -103,6 +104,24 @@ pub fn execute(
         commands: exported_commands,
         elapsed_ms: started.elapsed().as_millis(),
     }))
+}
+
+fn install_current_matches(
+    mise: &impl Mise,
+    plan: &InstallPlan,
+    install_mode: InstallMode,
+) -> Result<bool, Error> {
+    if !plan.current_matches() {
+        return Ok(false);
+    }
+
+    match install_mode {
+        InstallMode::Isolated => Ok(true),
+        InstallMode::Global => Ok(mise
+            .installed_global_package_version(plan.tool_id(), plan.variant().variant_dir())?
+            .as_deref()
+            == Some(plan.package_version())),
+    }
 }
 
 fn install_isolated(

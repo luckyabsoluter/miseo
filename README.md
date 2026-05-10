@@ -54,6 +54,7 @@ Under the hood, `miseo` creates a dedicated tool root at `~/.miseo/npm-http-serv
 Each installed target gets a versioned runtime-scoped directory, typically:
 
 - `~/.miseo/npm-http-server/14.1.1+node-22.13.1`
+- `~/.miseo/npm-http-server/global+node-22.13.1` for `miseo install -g npm:http-server`
 
 By default, package content is installed directly into that variant directory with `mise install-into`. When `-g`/`--global` is provided, npm packages are instead installed with `npm install -g` inside the activated variant environment.
 
@@ -101,6 +102,7 @@ mise exec --cd ~/.miseo/npm-http-server/14.1.1+node-22.13.1 -- \
 ```
 
 In global mode, the generated command wrapper activates the same per-tool `mise.toml` and invokes the absolute path to the executable created in that runtime's global npm bin directory.
+The npm package is still installed with the resolved exact version. The variant directory uses `global+<runtime>` because that runtime's global npm install can later be changed outside of `miseo`; current checks look up the installed global package version instead of trusting the manifest record.
 
 ## Limitations and trade-offs
 

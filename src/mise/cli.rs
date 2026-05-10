@@ -1,6 +1,6 @@
 //! Host `mise` integration backed by subprocess calls.
 
-use std::{collections::BTreeMap, fs, process::Command};
+use std::{collections::BTreeMap, fs, io, process::Command};
 
 use serde::Deserialize;
 
@@ -239,16 +239,21 @@ fn require_non_empty(value: String, context: &str) -> Result<String, Error> {
     Ok(value)
 }
 
-fn npm_package_json_path(root: String, tool_spec: &ToolSpec) -> Result<PathBuf, Error> {
+fn npm_package_json_path(root: String, tool_id: &ToolId) -> Result<PathBuf, Error> {
     let root = require_non_empty(root, "npm root -g")?;
     Ok(PathBuf::from(root)
-        .join(tool_spec.tool_id().name())
+        .join(tool_id.name())
         .join("package.json"))
 }
 
 fn npm_package_commands(package_json: &str) -> Result<Vec<String>, Error> {
     let package: NpmPackageJson = serde_json::from_str(package_json)?;
     Ok(commands_from_package_json(package))
+}
+
+fn npm_package_version(package_json: &str) -> Result<Option<String>, Error> {
+    let package: NpmPackageJson = serde_json::from_str(package_json)?;
+    Ok(package.version.filter(|version| !version.is_empty()))
 }
 
 fn npm_global_bin_dir(prefix: String) -> Result<PathBuf, Error> {
@@ -421,7 +426,7 @@ impl Mise for Cli {
 
         let args = npm_root_global_args(project_dir);
         let root = self.run_capture_owned(&args)?;
-        let package_json_path = npm_package_json_path(root, tool_spec)?;
+        let package_json_path = npm_package_json_path(root, tool_spec.tool_id())?;
         let package_json = fs::read_to_string(package_json_path.as_std_path())?;
         let commands = npm_package_commands(&package_json)?;
 
@@ -430,6 +435,26 @@ impl Mise for Cli {
         let bin_dir = npm_global_bin_dir(prefix)?;
 
         Ok(npm_command_targets(&bin_dir, commands))
+    }
+
+    fn installed_global_package_version(
+        &self,
+        tool_id: &ToolId,
+        project_dir: &Path,
+    ) -> Result<Option<String>, Error> {
+        if tool_id.backend() != &Backend::Npm {
+            return Ok(None);
+        }
+
+        let args = npm_root_global_args(project_dir);
+        let root = self.run_capture_owned(&args)?;
+        let package_json_path = npm_package_json_path(root, tool_id)?;
+
+        match fs::read_to_string(package_json_path.as_std_path()) {
+            Ok(package_json) => npm_package_version(&package_json),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
     }
 
     fn uninstall_global(&self, tool_id: &ToolId, project_dir: &Path) -> Result<(), Error> {
@@ -466,6 +491,7 @@ struct LsEntry {
 #[derive(Debug, Deserialize)]
 struct NpmPackageJson {
     name: Option<String>,
+    version: Option<String>,
     bin: Option<NpmBin>,
 }
 

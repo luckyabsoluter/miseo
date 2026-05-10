@@ -19,6 +19,7 @@ pub struct Test {
     global_installed: HashMap<Runtime, bool>,
     selector_current: HashMap<(Runtime, String), String>,
     packages: HashMap<String, Package>,
+    global_packages: RefCell<HashMap<String, String>>,
     global_uninstalls: RefCell<Vec<GlobalUninstall>>,
 }
 
@@ -31,6 +32,7 @@ impl fmt::Debug for Test {
             .field("global_installed", &self.global_installed)
             .field("selector_current", &self.selector_current)
             .field("packages", &self.packages)
+            .field("global_packages", &self.global_packages)
             .field("global_uninstalls", &self.global_uninstalls)
             .finish()
     }
@@ -51,6 +53,7 @@ impl Test {
             global_installed: HashMap::new(),
             selector_current: HashMap::new(),
             packages: HashMap::new(),
+            global_packages: RefCell::new(HashMap::new()),
             global_uninstalls: RefCell::new(vec![]),
         }
     }
@@ -129,6 +132,18 @@ impl Test {
         self.latest(latest_key, version);
         self.packages.insert(exact_key, Package { bins });
 
+        self
+    }
+
+    /// Seed the version currently present in the runtime global package store.
+    pub fn global_package_version(
+        &mut self,
+        tool_id: impl Into<String>,
+        version: impl Into<String>,
+    ) -> &mut Self {
+        self.global_packages
+            .borrow_mut()
+            .insert(tool_id.into(), version.into());
         self
     }
 
@@ -229,7 +244,17 @@ impl Mise for Test {
         Ok(RuntimeSpec::new(runtime.clone(), version))
     }
 
-    fn install_global(&self, _tool_spec: &ToolSpec, _project_dir: &Path) -> Result<(), Error> {
+    fn install_global(&self, tool_spec: &ToolSpec, _project_dir: &Path) -> Result<(), Error> {
+        let Some(version) = tool_spec.version() else {
+            return Err(invariant!(
+                "fake global install requires exact tool spec, got '{tool_spec}'"
+            ));
+        };
+
+        self.global_packages
+            .borrow_mut()
+            .insert(tool_spec.tool_id().to_string(), version.to_string());
+
         Ok(())
     }
 
@@ -274,6 +299,18 @@ impl Mise for Test {
                 (command, target)
             })
             .collect())
+    }
+
+    fn installed_global_package_version(
+        &self,
+        tool_id: &ToolId,
+        _project_dir: &Path,
+    ) -> Result<Option<String>, Error> {
+        Ok(self
+            .global_packages
+            .borrow()
+            .get(&tool_id.to_string())
+            .cloned())
     }
 
     fn uninstall_global(&self, tool_id: &ToolId, project_dir: &Path) -> Result<(), Error> {

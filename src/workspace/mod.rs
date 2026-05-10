@@ -55,6 +55,13 @@ impl InstallMode {
             _ => Err(invariant!("unknown install mode '{value}'")),
         }
     }
+
+    fn variant_label(self, package_version: &str) -> &str {
+        match self {
+            Self::Isolated => package_version,
+            Self::Global => "global",
+        }
+    }
 }
 
 /// Result of removing a managed tool from workspace state.
@@ -174,6 +181,7 @@ impl Workspace {
         &self,
         spec: &ToolSpec,
         runtime_pins: &RuntimePins,
+        install_mode: InstallMode,
     ) -> Result<InstallPlan, Error> {
         let Some(package_version) = spec.version() else {
             return Err(invariant!(
@@ -182,10 +190,11 @@ impl Workspace {
         };
 
         let tool_id = spec.tool_id().clone();
-        let variant_key = install_variant_key(package_version, runtime_pins);
+        let variant_key =
+            install_variant_key(install_mode.variant_label(package_version), runtime_pins);
         let variant = self.layout_for_spec(spec).variant(&variant_key);
         let had_tool_before = self.has(&tool_id);
-        let current_matches = self.variant_is_current(&tool_id, &variant_key);
+        let current_matches = self.install_is_current(&tool_id, &variant_key, install_mode)?;
 
         Ok(InstallPlan {
             tool_id,
@@ -420,10 +429,32 @@ impl Workspace {
         self.manifest.has(tool_id)
     }
 
-    fn variant_is_current(&self, tool_id: &ToolId, variant_key: &str) -> bool {
-        self.manifest
-            .tool_by_id(tool_id)
-            .is_some_and(|tool| tool.current_variant == variant_key)
+    fn install_is_current(
+        &self,
+        tool_id: &ToolId,
+        variant_key: &str,
+        install_mode: InstallMode,
+    ) -> Result<bool, Error> {
+        let Some(tool) = self.manifest.tool_by_id(tool_id) else {
+            return Ok(false);
+        };
+
+        if tool.current_variant != variant_key {
+            return Ok(false);
+        }
+
+        let Some(current) = tool.variants.get(&tool.current_variant) else {
+            return Err(invariant!(
+                "tool '{tool_id}' current variant '{current_variant}' missing",
+                current_variant = tool.current_variant
+            ));
+        };
+
+        if InstallMode::parse(&current.install_mode)? != install_mode {
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 
     pub fn upgrade_uses(&self, tool_id: &ToolId, uses: RuntimePins) -> Result<RuntimePins, Error> {
@@ -591,14 +622,14 @@ impl Workspace {
     }
 }
 
-fn install_variant_key(package_version: &str, runtimes: &RuntimePins) -> String {
+fn install_variant_key(package_label: &str, runtimes: &RuntimePins) -> String {
     let pins = runtimes
         .values()
         .map(|pin| pin.runtime().with_version(pin.selector()))
         .collect::<Vec<_>>()
         .join("+");
 
-    format!("{package_version}+{pins}")
+    format!("{package_label}+{pins}")
 }
 
 fn stale_commands(previous: &[String], current: &[String]) -> Vec<String> {
@@ -789,8 +820,28 @@ mod tests {
             RuntimeSpec::new(Runtime::Node, "22.13.1".to_string()),
         );
 
-        let plan = workspace.plan_install(&spec, &runtimes).unwrap();
+        let plan = workspace
+            .plan_install(&spec, &runtimes, InstallMode::Isolated)
+            .unwrap();
         assert_eq!(plan.variant_key(), "1.2.3+node-22.13.1+ruby-3.3.0");
+    }
+
+    #[test]
+    fn plan_install_uses_global_label_for_global_mode_variant_key() {
+        let workspace = TestWorkspace::seeded();
+        let spec: ToolSpec = "npm:prettier@1.2.3".parse().unwrap();
+
+        let mut runtimes = RuntimePins::new();
+        runtimes.insert(
+            Runtime::Node,
+            RuntimeSpec::new(Runtime::Node, "22.13.1".to_string()),
+        );
+
+        let plan = workspace
+            .plan_install(&spec, &runtimes, InstallMode::Global)
+            .unwrap();
+        assert_eq!(plan.variant_key(), "global+node-22.13.1");
+        assert_eq!(plan.package_version(), "1.2.3");
     }
 
     #[test]

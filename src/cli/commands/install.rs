@@ -179,11 +179,53 @@ mod tests {
 
         test.run(command("miseo install -g npm:prettier")).unwrap();
 
+        assert_eq!(
+            test.fs()
+                .readlink(&test.path("npm-prettier/current"))
+                .unwrap(),
+            {
+                #[cfg(not(windows))]
+                {
+                    Some(PathBuf::from("global+node-24.13.1"))
+                }
+                #[cfg(windows)]
+                {
+                    Some(test.path("npm-prettier/global+node-24.13.1"))
+                }
+            }
+        );
+
         let manifest = test.manifest();
+        assert_eq!(
+            manifest.current_variant_str("npm:prettier"),
+            Some("global+node-24.13.1")
+        );
         assert_eq!(
             manifest.current_install_mode_str("npm:prettier"),
             Some("global")
         );
+    }
+
+    #[test]
+    fn install_global_rechecks_installed_global_package_version() {
+        let mut test = TestApp::new();
+
+        test.mise_mut()
+            .use_g(Runtime::Node, "24", "24.13.1")
+            .register_package("npm:prettier", "3.8.1", ["prettier"]);
+
+        test.run(command("miseo install -g npm:prettier")).unwrap();
+        test.out().clear();
+
+        test.mise_mut()
+            .global_package_version("npm:prettier", "3.8.0");
+
+        test.run(command("miseo install -g npm:prettier")).unwrap();
+
+        test.out().assert_out(&[
+            "miseo installed npm:prettier@3.8.1 [node@24.13.1] in ...ms",
+            "  miseo installed command: prettier",
+        ]);
     }
 
     #[test]

@@ -61,6 +61,13 @@ pub trait Mise {
         project_dir: &Path,
     ) -> Result<BTreeMap<String, PathBuf>, Error>;
 
+    /// Lookup the currently installed global package version under the tool-local runtime.
+    fn installed_global_package_version(
+        &self,
+        tool_id: &ToolId,
+        project_dir: &Path,
+    ) -> Result<Option<String>, Error>;
+
     /// Return executable bin directories for the installed package at `install_dir`.
     fn bin_paths(&self, tool_id: &ToolId, install_dir: &Path) -> Result<Vec<PathBuf>, Error>;
 

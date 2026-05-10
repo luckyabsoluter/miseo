@@ -67,9 +67,10 @@ Canonical `tool_key` (filesystem key):
 
 Canonical `install_variant` (concrete install target):
 
-- `<pkg-exact-version>+<runtime-tuple>`
+- default mode: `<pkg-exact-version>+<runtime-tuple>`
+- global npm mode: `global+<runtime-tuple>`
 - `runtime-tuple` is one or more `<runtime>-<runtime-pin>` segments, sorted by runtime and joined by `+`
-- examples: `14.1.1+node-22.13.1`, `1.2.3+node-22.13.1+ruby-3.3.0`
+- examples: `14.1.1+node-22.13.1`, `global+node-22.13.1`, `1.2.3+node-22.13.1+ruby-3.3.0`
 
 ## Filesystem Model
 
@@ -84,6 +85,7 @@ Per-tool directory:
 Per-install directory:
 
 - `~/.miseo/<tool-key>/<pkg-version>+<runtime-tuple>`
+- `~/.miseo/<tool-key>/global+<runtime-tuple>` for `install -g`
 - common example: `~/.miseo/npm-http-server/14.1.1+node-22.13.1`
 
 Current pointer:
@@ -104,6 +106,10 @@ Layout example:
   npm-http-server/
     current -> 14.1.1+node-22.13.1
     14.1.1+node-22.13.1/
+      mise.toml
+      .miseo/
+        http-server
+    global+node-22.13.1/
       mise.toml
       .miseo/
         http-server
@@ -173,6 +179,7 @@ mise exec --cd ~/.miseo/<tool-key>/<variant> -- npm install -g <package>@<exact-
 ```
 
 The tool-local directory contains a generated `mise.toml` with exact runtime pins before npm runs in global mode, so the npm global install lands in the activated runtime's global package location instead of relying on the caller's current project.
+Global mode still installs the resolved exact package version. The variant key uses `global` instead of the package version because the runtime global npm install can be changed outside of `miseo`; package metadata remains a record of what `miseo` installed, not a content-addressed directory name. Current checks activate the same runtime and read the installed global package version from npm rather than trusting that recorded metadata.
 
 Package version resolution policy:
 
