@@ -114,6 +114,7 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v3
         with:
+          version: 2026.4.28
           install: false
 
       - name: Install miseo
@@ -124,7 +125,13 @@ jobs:
         run: Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.miseo\.bin"
 
       - name: Verify mise is available
-        run: mise --version
+        shell: pwsh
+        run: |
+          $expected = "2026.4.28 windows-x64 (2026-04-30)"
+          $actual = (mise --version | Select-Object -First 1).Trim()
+          if ($actual -ne $expected) {
+            throw "unexpected mise version: $actual"
+          }
 
       - name: Configure global Node runtime (mise)
         run: mise use -g node@24
