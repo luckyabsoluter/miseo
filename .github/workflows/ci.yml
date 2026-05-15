@@ -96,6 +96,42 @@ jobs:
           test ! -e "$HOME/.miseo/.bin/prettier"
           test ! -d "$HOME/.miseo/npm-prettier"
 
+      - name: Install prettier globally with miseo
+        shell: bash
+        run: miseo install -g npm:prettier@3.8.1
+
+      - name: Verify global prettier npm install
+        shell: bash
+        run: |
+          set -o pipefail
+          case "$(readlink "$HOME/.miseo/npm-prettier/current")" in
+            global+node-*) ;;
+            *) exit 1 ;;
+          esac
+
+          global_version="$(
+            mise exec --cd "$HOME/.miseo/npm-prettier/current" -- npm list -g prettier --json --depth=0 |
+              node -e "let data = ''; process.stdin.on('data', chunk => data += chunk); process.stdin.on('end', () => { const version = JSON.parse(data).dependencies?.prettier?.version; if (!version) process.exit(1); process.stdout.write(version); });"
+          )"
+          test "$global_version" = "3.8.1"
+
+          global_prefix="$(mise exec --cd "$HOME/.miseo/npm-prettier/current" -- npm prefix -g)"
+          test -x "$global_prefix/bin/prettier"
+
+      - name: Global prettier formats a file via miseo shim
+        shell: bash
+        run: |
+          test -L "$HOME/.miseo/.bin/prettier"
+          printf 'const y={b:2}\n' > global-smoke.js
+          prettier --write global-smoke.js >/dev/null
+          diff -u <(printf 'const y = { b: 2 };\n') global-smoke.js
+
+      - name: Uninstall global prettier
+        run: |
+          miseo uninstall npm:prettier
+          test ! -e "$HOME/.miseo/.bin/prettier"
+          test ! -d "$HOME/.miseo/npm-prettier"
+
   windows-smoke-test:
     name: Windows Smoke Test
     runs-on: windows-latest
@@ -153,6 +189,51 @@ jobs:
           prettier.cmd --check smoke.js
 
       - name: Uninstall prettier
+        shell: pwsh
+        run: |
+          miseo uninstall npm:prettier
+          if (Test-Path "$env:USERPROFILE\.miseo\.bin\prettier") { throw "prettier shim remains" }
+          if (Test-Path "$env:USERPROFILE\.miseo\.bin\prettier.cmd") { throw "prettier.cmd shim remains" }
+          if (Test-Path "$env:USERPROFILE\.miseo\.bin\prettier.ps1") { throw "prettier.ps1 shim remains" }
+          if (Test-Path "$env:USERPROFILE\.miseo\npm-prettier") { throw "prettier install dir remains" }
+
+      - name: Install prettier globally with miseo
+        shell: pwsh
+        run: miseo install -g npm:prettier@3.8.1
+
+      - name: Verify global prettier npm install
+        shell: pwsh
+        run: |
+          $globalVariants = @(Get-ChildItem -Path "$env:USERPROFILE\.miseo\npm-prettier" -Directory |
+            Where-Object { $_.Name -like "global+node-*" }
+          )
+          if ($globalVariants.Count -ne 1) { throw "expected one global variant dir, found $($globalVariants.Count)" }
+          $globalVariant = $globalVariants[0]
+
+          $globalJson = mise exec --cd $globalVariant.FullName -- npm list -g prettier --json --depth=0
+          if ($LASTEXITCODE -ne 0) { throw "npm list -g prettier failed" }
+          $globalVersion = ($globalJson | ConvertFrom-Json).dependencies.prettier.version
+          if ($globalVersion -ne "3.8.1") { throw "unexpected global prettier version: $globalVersion" }
+
+          $globalPrefix = mise exec --cd $globalVariant.FullName -- npm prefix -g
+          if ($LASTEXITCODE -ne 0) { throw "npm prefix -g failed" }
+          if (!(Test-Path (Join-Path $globalPrefix "prettier.cmd"))) { throw "global prettier.cmd missing" }
+
+      - name: Global prettier formats a file via Windows shim
+        shell: pwsh
+        run: |
+          if (!(Test-Path "$env:USERPROFILE\.miseo\.bin\prettier")) { throw "prettier shim missing" }
+          if (!(Test-Path "$env:USERPROFILE\.miseo\.bin\prettier.cmd")) { throw "prettier.cmd shim missing" }
+          if (!(Test-Path "$env:USERPROFILE\.miseo\.bin\prettier.ps1")) { throw "prettier.ps1 shim missing" }
+
+          Set-Content -Path global-smoke.js -Value 'const y={b:2}'
+          prettier.cmd --write global-smoke.js
+          $actual = (Get-Content -Raw global-smoke.js).Replace("`r`n", "`n")
+          if ($actual -ne "const y = { b: 2 };`n") {
+            throw "unexpected global prettier output: $actual"
+          }
+
+      - name: Uninstall global prettier
         shell: pwsh
         run: |
           miseo uninstall npm:prettier
