@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use crate::{
     error::{Error, invariant},
     fs::{Fs, Path, PathBuf},
+    launch::CommandTarget,
     spec::{Runtime, RuntimePins, RuntimeSpec, ToolId, ToolLayout, ToolSpec, VariantLayout},
 };
 
@@ -243,7 +244,7 @@ impl Workspace {
     pub fn discover_executables(
         &self,
         bin_paths: &[PathBuf],
-    ) -> Result<BTreeMap<String, PathBuf>, Error> {
+    ) -> Result<BTreeMap<String, CommandTarget>, Error> {
         let mut map = BTreeMap::new();
         let mut seen = BTreeSet::new();
 
@@ -262,7 +263,7 @@ impl Workspace {
                 };
 
                 if seen.insert(name.clone()) {
-                    map.insert(name, path);
+                    map.insert(name, CommandTarget::env_wrapped(path));
                 }
             }
         }
@@ -282,14 +283,14 @@ impl Workspace {
     fn link_discovered_commands(
         &self,
         variant: &VariantLayout,
-        discovered: &BTreeMap<String, PathBuf>,
+        discovered: &BTreeMap<String, CommandTarget>,
     ) -> Result<(), Error> {
         self.fs.mkdir_p(variant.local_bin_dir())?;
 
         for (command, target) in discovered {
             let local_cmd = variant.local_command(command);
             self.fs
-                .write_mise_env_shim(variant.variant_dir(), target, &local_cmd)?;
+                .write_command_shim(variant.variant_dir(), target, &local_cmd)?;
 
             self.fs.ln_s(
                 &variant.public_target(command),
@@ -304,7 +305,7 @@ impl Workspace {
         &mut self,
         plan: &InstallPlan,
         install_mode: InstallMode,
-        discovered: BTreeMap<String, PathBuf>,
+        discovered: BTreeMap<String, CommandTarget>,
     ) -> Result<Vec<String>, Error> {
         let exported_commands = discovered.keys().cloned().collect::<Vec<_>>();
         if exported_commands.is_empty() {

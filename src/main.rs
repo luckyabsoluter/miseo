@@ -3,6 +3,7 @@
 mod cli;
 mod error;
 mod fs;
+mod launch;
 mod mise;
 mod spec;
 mod tasks;

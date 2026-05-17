@@ -4,7 +4,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::error::{Error, invariant};
+use crate::{
+    error::{Error, invariant},
+    launch::CommandTarget,
+};
 
 use super::{Fs, Path, PathBuf};
 
@@ -111,10 +114,10 @@ impl Fs for UnixFs {
         Ok(())
     }
 
-    fn write_mise_env_shim(
+    fn write_command_shim(
         &self,
         project_dir: &Path,
-        target: &Path,
+        target: &CommandTarget,
         path: &Path,
     ) -> Result<(), Error> {
         let parent = path
@@ -157,7 +160,26 @@ fn shell_single_quote(input: &str) -> String {
     input.replace('\'', "'\\''")
 }
 
-fn shim_content(project_dir: &Path, target: &Path) -> String {
+fn shim_content(project_dir: &Path, target: &CommandTarget) -> String {
+    match target {
+        CommandTarget::EnvWrapped(target) => mise_env_shim_content(project_dir, target),
+        CommandTarget::RuntimeEntrypoint {
+            runtime,
+            entrypoint,
+        } => runtime_entrypoint_shim_content(project_dir, runtime.as_ref(), entrypoint),
+    }
+}
+
+fn runtime_entrypoint_shim_content(project_dir: &Path, runtime: &str, entrypoint: &Path) -> String {
+    let escaped_project_dir = shell_single_quote(project_dir.as_str());
+    let escaped_runtime = shell_single_quote(runtime);
+    let escaped_entrypoint = shell_single_quote(entrypoint.as_str());
+    format!(
+        "#!/bin/sh\nruntime_path=\"$(mise which '{escaped_runtime}' -C '{escaped_project_dir}')\" || exit $?\nexec \"$runtime_path\" '{escaped_entrypoint}' \"$@\"\n"
+    )
+}
+
+fn mise_env_shim_content(project_dir: &Path, target: &Path) -> String {
     let escaped_project_dir = shell_single_quote(project_dir.as_str());
     let escaped_target = shell_single_quote(target.as_str());
     format!(
@@ -185,6 +207,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::error::Error;
+
+    use crate::launch::CommandTarget;
 
     use super::{Fs, PathBuf, UnixFs};
 
@@ -257,13 +281,13 @@ mod tests {
     }
 
     #[test]
-    fn write_mise_env_shim_creates_exec_wrapper() {
+    fn write_command_shim_uses_mise_env_for_env_wrapped_targets() {
         let tmp = tempdir().unwrap();
         let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
 
-        let target = root.join("global-bin/target-bin");
+        let target = CommandTarget::env_wrapped(root.join("global-bin/target-bin"));
         let shim = root.join("shim");
-        UnixFs.write_mise_env_shim(&root, &target, &shim).unwrap();
+        UnixFs.write_command_shim(&root, &target, &shim).unwrap();
 
         let content = fs::read_to_string(shim.as_std_path()).unwrap();
         assert!(content.starts_with("#!/bin/sh\neval \"$(mise env -C '"));
@@ -277,6 +301,23 @@ mod tests {
                 & 0o777
         };
         assert_eq!(mode, 0o755);
+    }
+
+    #[test]
+    fn write_command_shim_runs_node_entrypoint_without_mise_env() {
+        let tmp = tempdir().unwrap();
+        let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+
+        let entrypoint = root.join("entrypoints/tool.js");
+        let target = CommandTarget::runtime_entrypoint(crate::spec::Runtime::Node, entrypoint);
+        let shim = root.join("shim");
+        UnixFs.write_command_shim(&root, &target, &shim).unwrap();
+
+        let content = fs::read_to_string(shim.as_std_path()).unwrap();
+        assert!(content.contains("mise which 'node' -C"));
+        assert!(content.contains("exec \"$runtime_path\" '"));
+        assert!(content.contains("entrypoints/tool.js' \"$@\""));
+        assert!(!content.contains("mise env"));
     }
 
     #[test]

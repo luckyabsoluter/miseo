@@ -205,7 +205,7 @@ mise exec --cd ~/.miseo/<tool-key>/<variant> -- npm root -g
 
 Then `miseo` reads the installed package's `package.json` and uses the `bin` field to determine command names. Object-form `bin` keys are used directly. String-form `bin` exports the unscoped package name.
 
-`miseo` also asks npm for the activated global prefix and turns each command name into an absolute executable path in that runtime's global npm bin directory. Shims execute that absolute global path after activating the tool-local `mise.toml`.
+`miseo` turns discovered commands into explicit command launch plans. Runtime-specific launch behavior lives under launch extensions, such as the Node extension that recognizes JS entrypoints. For npm global installs, `miseo` reads each `package.json` `bin` path and asks the Node launch extension whether that bin can run as a direct Node entrypoint. The generated shim then runs `mise which node -C <variant>` and executes the entrypoint with that Node directly. If the bin path is not a Node script, `miseo` asks npm for the activated global prefix, points the command at the executable in that runtime's global npm bin directory, and uses the compatibility fallback that activates the tool-local `mise.toml` before execution.
 
 This contract is important because command names are not always equal to package names, and packages may export multiple binaries.
 

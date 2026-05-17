@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, time::Instant};
 
 use crate::{
     error::Error,
-    fs::PathBuf,
+    launch::CommandTarget,
     mise::Mise,
     spec::{RuntimePins, ToolId, ToolSpec},
     workspace::{InstallMode, InstallPlan, Workspace},
@@ -129,7 +129,7 @@ fn install_isolated(
     workspace: &Workspace,
     exact_spec: &ToolSpec,
     plan: &InstallPlan,
-) -> Result<BTreeMap<String, PathBuf>, Error> {
+) -> Result<BTreeMap<String, CommandTarget>, Error> {
     with_new_tool_cleanup(
         workspace,
         plan,
@@ -160,7 +160,7 @@ fn install_global(
     workspace: &Workspace,
     exact_spec: &ToolSpec,
     plan: &InstallPlan,
-) -> Result<BTreeMap<String, PathBuf>, Error> {
+) -> Result<BTreeMap<String, CommandTarget>, Error> {
     let mise_toml = with_new_tool_cleanup(
         workspace,
         plan,

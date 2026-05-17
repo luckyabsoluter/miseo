@@ -101,15 +101,15 @@ mise exec --cd ~/.miseo/npm-http-server/14.1.1+node-22.13.1 -- \
   npm install -g http-server@14.1.1
 ```
 
-In global mode, the generated command wrapper activates the same per-tool `mise.toml` and invokes the absolute path to the executable created in that runtime's global npm bin directory.
+In global mode, npm command discovery reads the installed package's `bin` metadata. When a bin entry points to a Node JS entrypoint, `miseo` resolves the pinned Node with `mise which node -C <variant>` and runs that entrypoint directly instead of exporting the whole tool-local environment. If the bin entry is not a Node script, the wrapper falls back to the executable created in that runtime's global npm bin directory.
 The npm package is still installed with the resolved exact version. The variant directory uses `global+<runtime>` because that runtime's global npm install can later be changed outside of `miseo`; current checks look up the installed global package version instead of trusting the manifest record.
 
 ## Limitations and trade-offs
 
 The explicit trade-off we made with `miseo` approach is to prioritize stability for global tools and make upgrading, including its runtime environment, an explicit choice.
 
-From an implementation standpoint, this means giving each CLI tool an explicit `mise` environment which we materialize in the shim before executing the tool. This adds a small amount of overhead but for the most part should be imperceptible, though that depends on the expected performance and use cases of the CLI tool in question. If you noticed substantial degradation, please open an issue with the specifics of your use case so we can discuss potential improvements.
+From an implementation standpoint, this means giving each CLI tool explicit runtime pins and then generating a command launch plan. A launch plan can either activate the tool-local environment before running an executable, or resolve one pinned runtime and run a known entrypoint directly. Runtime-specific decisions live in launch extensions; npm global installs use the Node launch extension for package bins so the install runtime does not leak into project commands spawned by the tool.
 
-More importantly, from a functional standpoint, this strategy means that if the CLI tool tries to resolve or shell out to the runtime tools that are part of their environment, it will get the versions that are pinned for them. For general purpose CLI utilities like `http-server` and `ripgrep`, this is fine and may even be important for correctness (e.g. if they need to spawn sub-processes to parallelize work).
+More importantly, from a functional standpoint, this strategy means ordinary global utilities keep their stable install runtime, while agent-style tools that spawn project commands do not force that runtime onto child processes when backend discovery can identify a direct runtime entrypoint.
 
 However, for devtools like [tsx](https://www.npmjs.com/package/tsx), this might not be what you want. For those kinds of tools, the floating approach of `mise use -g` may work better. Arguably, the more correct fix is to add `tsx` to your project's dev dependencies and let the project-local version take precedence.

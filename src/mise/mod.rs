@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use crate::{
     error::Error,
     fs::{Path, PathBuf},
+    launch::CommandTarget,
     spec::{Backend, Runtime, RuntimePins, RuntimeSpec, ToolId, ToolSpec},
 };
 
@@ -59,7 +60,7 @@ pub trait Mise {
         &self,
         tool_spec: &ToolSpec,
         project_dir: &Path,
-    ) -> Result<BTreeMap<String, PathBuf>, Error>;
+    ) -> Result<BTreeMap<String, CommandTarget>, Error>;
 
     /// Lookup the currently installed global package version under the tool-local runtime.
     fn installed_global_package_version(

@@ -7,6 +7,7 @@ use serde::Deserialize;
 use crate::{
     error::{Error, invariant},
     fs::{Path, PathBuf},
+    launch::{CommandTarget, node},
     spec::{Backend, Runtime, RuntimePins, RuntimeSpec, ToolId, ToolSpec},
 };
 
@@ -239,16 +240,18 @@ fn require_non_empty(value: String, context: &str) -> Result<String, Error> {
     Ok(value)
 }
 
-fn npm_package_json_path(root: String, tool_id: &ToolId) -> Result<PathBuf, Error> {
+fn npm_package_dir(root: String, tool_id: &ToolId) -> Result<PathBuf, Error> {
     let root = require_non_empty(root, "npm root -g")?;
-    Ok(PathBuf::from(root)
-        .join(tool_id.name())
-        .join("package.json"))
+    Ok(PathBuf::from(root).join(tool_id.name()))
 }
 
-fn npm_package_commands(package_json: &str) -> Result<Vec<String>, Error> {
+fn npm_package_json_path(package_dir: &Path) -> PathBuf {
+    package_dir.join("package.json")
+}
+
+fn npm_package_bins(package_json: &str) -> Result<BTreeMap<String, String>, Error> {
     let package: NpmPackageJson = serde_json::from_str(package_json)?;
-    Ok(commands_from_package_json(package))
+    Ok(bins_from_package_json(package))
 }
 
 fn npm_package_version(package_json: &str) -> Result<Option<String>, Error> {
@@ -270,31 +273,35 @@ fn npm_global_bin_dir(prefix: String) -> Result<PathBuf, Error> {
     }
 }
 
-fn npm_command_targets(bin_dir: &Path, commands: Vec<String>) -> BTreeMap<String, PathBuf> {
-    commands
-        .into_iter()
-        .filter(|command| !command.is_empty())
-        .map(|command| {
-            let target = bin_dir.join(&command);
+fn npm_command_targets(
+    package_dir: &Path,
+    bin_dir: &Path,
+    bins: BTreeMap<String, String>,
+) -> BTreeMap<String, CommandTarget> {
+    bins.into_iter()
+        .filter(|(command, relative)| !command.is_empty() && !relative.is_empty())
+        .map(|(command, relative)| {
+            let fallback = bin_dir.join(&command);
+            let target = node::package_bin_target(package_dir, &relative, fallback);
             (command, target)
         })
         .collect()
 }
 
-fn commands_from_package_json(package: NpmPackageJson) -> Vec<String> {
+fn bins_from_package_json(package: NpmPackageJson) -> BTreeMap<String, String> {
     match package.bin {
         Some(NpmBin::Command(path)) if !path.is_empty() => package
             .name
             .as_deref()
             .map(default_npm_bin_name)
             .filter(|name| !name.is_empty())
-            .map(|name| vec![name.to_string()])
+            .map(|name| BTreeMap::from([(name.to_string(), path)]))
             .unwrap_or_default(),
         Some(NpmBin::Commands(commands)) => commands
-            .into_keys()
-            .filter(|command| !command.is_empty())
+            .into_iter()
+            .filter(|(command, path)| !command.is_empty() && !path.is_empty())
             .collect(),
-        _ => vec![],
+        _ => BTreeMap::new(),
     }
 }
 
@@ -417,7 +424,7 @@ impl Mise for Cli {
         &self,
         tool_spec: &ToolSpec,
         project_dir: &Path,
-    ) -> Result<BTreeMap<String, PathBuf>, Error> {
+    ) -> Result<BTreeMap<String, CommandTarget>, Error> {
         if tool_spec.backend() != &Backend::Npm {
             return Err(invariant!(
                 "global command discovery currently supports npm packages, got '{tool_spec}'"
@@ -426,15 +433,16 @@ impl Mise for Cli {
 
         let args = npm_root_global_args(project_dir);
         let root = self.run_capture_owned(&args)?;
-        let package_json_path = npm_package_json_path(root, tool_spec.tool_id())?;
+        let package_dir = npm_package_dir(root, tool_spec.tool_id())?;
+        let package_json_path = npm_package_json_path(&package_dir);
         let package_json = fs::read_to_string(package_json_path.as_std_path())?;
-        let commands = npm_package_commands(&package_json)?;
+        let bins = npm_package_bins(&package_json)?;
 
         let args = npm_prefix_global_args(project_dir);
         let prefix = self.run_capture_owned(&args)?;
         let bin_dir = npm_global_bin_dir(prefix)?;
 
-        Ok(npm_command_targets(&bin_dir, commands))
+        Ok(npm_command_targets(&package_dir, &bin_dir, bins))
     }
 
     fn installed_global_package_version(
@@ -448,7 +456,8 @@ impl Mise for Cli {
 
         let args = npm_root_global_args(project_dir);
         let root = self.run_capture_owned(&args)?;
-        let package_json_path = npm_package_json_path(root, tool_id)?;
+        let package_dir = npm_package_dir(root, tool_id)?;
+        let package_json_path = npm_package_json_path(&package_dir);
 
         match fs::read_to_string(package_json_path.as_std_path()) {
             Ok(package_json) => npm_package_version(&package_json),
@@ -504,6 +513,11 @@ enum NpmBin {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use tempfile::tempdir;
+
+    use crate::launch::CommandTarget;
     use crate::spec::{Runtime, RuntimePins, RuntimeSpec, ToolId, ToolSpec};
 
     use super::*;
@@ -657,30 +671,70 @@ mod tests {
     }
 
     #[test]
-    fn npm_package_commands_reads_object_bins() {
-        let commands =
-            npm_package_commands(r#"{"name":"pkg","bin":{"foo":"bin/foo.js","bar":"bin/bar.js"}}"#)
+    fn npm_package_bins_reads_object_bins() {
+        let bins =
+            npm_package_bins(r#"{"name":"pkg","bin":{"foo":"bin/foo.js","bar":"bin/bar.js"}}"#)
                 .unwrap();
 
-        assert_eq!(commands, vec!["bar".to_string(), "foo".to_string()]);
+        assert_eq!(
+            bins,
+            BTreeMap::from([
+                ("bar".to_string(), "bin/bar.js".to_string()),
+                ("foo".to_string(), "bin/foo.js".to_string())
+            ])
+        );
     }
 
     #[test]
-    fn npm_package_commands_uses_unscoped_name_for_string_bin() {
-        let commands =
-            npm_package_commands(r#"{"name":"@openai/codex","bin":"bin/codex.js"}"#).unwrap();
+    fn npm_package_bins_uses_unscoped_name_for_string_bin() {
+        let bins = npm_package_bins(r#"{"name":"@openai/codex","bin":"bin/codex.js"}"#).unwrap();
 
-        assert_eq!(commands, vec!["codex".to_string()]);
+        assert_eq!(
+            bins,
+            BTreeMap::from([("codex".to_string(), "bin/codex.js".to_string())])
+        );
     }
 
     #[test]
-    fn npm_command_targets_uses_global_bin_absolute_paths() {
+    fn npm_command_targets_run_node_entrypoints_directly() {
+        let tmp = tempdir().unwrap();
+        let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let package_dir = root.join("node_modules/@openai/codex");
         let bin_dir = PathBuf::from("/tmp/mise/installs/node/24.13.1/bin");
-        let targets = npm_command_targets(&bin_dir, vec!["codex".to_string()]);
+        let entrypoint = package_dir.join("bin/codex.js");
+        std::fs::create_dir_all(entrypoint.parent().unwrap().as_std_path()).unwrap();
+        std::fs::write(entrypoint.as_std_path(), "#!/usr/bin/env node\n").unwrap();
+
+        let targets = npm_command_targets(
+            &package_dir,
+            &bin_dir,
+            BTreeMap::from([("codex".to_string(), "bin/codex.js".to_string())]),
+        );
 
         assert_eq!(
             targets.get("codex"),
-            Some(&PathBuf::from("/tmp/mise/installs/node/24.13.1/bin/codex"))
+            Some(&CommandTarget::runtime_entrypoint(
+                Runtime::Node,
+                package_dir.join("bin/codex.js")
+            ))
+        );
+    }
+
+    #[test]
+    fn npm_command_targets_fall_back_to_global_bin_for_non_node_bins() {
+        let package_dir = PathBuf::from("/tmp/npm/node_modules/native-tool");
+        let bin_dir = PathBuf::from("/tmp/mise/installs/node/24.13.1/bin");
+        let targets = npm_command_targets(
+            &package_dir,
+            &bin_dir,
+            BTreeMap::from([("native-tool".to_string(), "bin/native-tool".to_string())]),
+        );
+
+        assert_eq!(
+            targets.get("native-tool"),
+            Some(&CommandTarget::env_wrapped(PathBuf::from(
+                "/tmp/mise/installs/node/24.13.1/bin/native-tool"
+            )))
         );
     }
 

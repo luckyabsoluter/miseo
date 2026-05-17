@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, fmt};
 use crate::{
     error::{Error, invariant},
     fs::{self, Fs, Path, PathBuf},
+    launch::CommandTarget,
     spec::{Runtime, RuntimePins, RuntimeSpec, ToolId, ToolSpec},
 };
 
@@ -284,7 +285,7 @@ impl Mise for Test {
         &self,
         tool_spec: &ToolSpec,
         _project_dir: &Path,
-    ) -> Result<BTreeMap<String, PathBuf>, Error> {
+    ) -> Result<BTreeMap<String, CommandTarget>, Error> {
         let commands = self
             .packages
             .get(&tool_spec.to_string())
@@ -296,7 +297,7 @@ impl Mise for Test {
             .filter(|command| !command.is_empty())
             .map(|command| {
                 let target = _project_dir.join(".npm-global").join(&command);
-                (command, target)
+                (command, CommandTarget::env_wrapped(target))
             })
             .collect())
     }

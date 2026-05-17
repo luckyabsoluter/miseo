@@ -5,7 +5,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::error::{Error, invariant};
+use crate::{
+    error::{Error, invariant},
+    launch::CommandTarget,
+};
 
 use super::{Fs, Path, PathBuf};
 
@@ -111,10 +114,10 @@ impl Fs for WindowsFs {
         replace_file(&tmp, path)
     }
 
-    fn write_mise_env_shim(
+    fn write_command_shim(
         &self,
         project_dir: &Path,
-        target: &Path,
+        target: &CommandTarget,
         path: &Path,
     ) -> Result<(), Error> {
         let parent = path
@@ -127,7 +130,7 @@ impl Fs for WindowsFs {
         let ps_tmp = temp_path(parent, ".miseo-ps1")?;
         fs::write(
             ps_tmp.as_std_path(),
-            powershell_shim_content(project_dir, &powershell_target_path(target)),
+            powershell_shim_content(project_dir, target),
         )?;
         replace_file(&ps_tmp, &ps_path)
     }
@@ -295,7 +298,33 @@ fn shell_shim_content(script: &Path) -> String {
     )
 }
 
-fn powershell_shim_content(project_dir: &Path, target: &Path) -> String {
+fn powershell_shim_content(project_dir: &Path, target: &CommandTarget) -> String {
+    match target {
+        CommandTarget::EnvWrapped(target) => {
+            powershell_mise_env_shim_content(project_dir, &powershell_target_path(target))
+        }
+        CommandTarget::RuntimeEntrypoint {
+            runtime,
+            entrypoint,
+        } => powershell_runtime_entrypoint_shim_content(project_dir, runtime.as_ref(), entrypoint),
+    }
+}
+
+fn powershell_runtime_entrypoint_shim_content(
+    project_dir: &Path,
+    runtime: &str,
+    entrypoint: &Path,
+) -> String {
+    format!(
+        "$runtime = (& mise which {} -C {}).Trim()\r\nif ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}\r\nif ($MyInvocation.ExpectingInput) {{ $input | & $runtime {} @args }} else {{ & $runtime {} @args }}\r\nexit $LASTEXITCODE\r\n",
+        ps_quote_str(runtime),
+        ps_quote(project_dir),
+        ps_quote(entrypoint),
+        ps_quote(entrypoint)
+    )
+}
+
+fn powershell_mise_env_shim_content(project_dir: &Path, target: &Path) -> String {
     format!(
         "Invoke-Expression (& mise env -C {} -s pwsh)\r\n& {} @args\r\nexit $LASTEXITCODE\r\n",
         ps_quote(project_dir),
@@ -337,6 +366,10 @@ fn cmd_path(path: &Path) -> String {
 
 fn ps_quote(path: &Path) -> String {
     format!("'{}'", cmd_path(path).replace('\'', "''"))
+}
+
+fn ps_quote_str(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn sh_quote(path: &Path) -> String {
@@ -462,6 +495,8 @@ fn unique_stamp() -> Result<u128, Error> {
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
+
+    use crate::launch::CommandTarget;
 
     use super::{Fs, Path, PathBuf, WindowsFs};
 
@@ -592,8 +627,9 @@ mod tests {
     #[test]
     fn powershell_shim_content_uses_mise_env_without_changing_directory() {
         let project_dir = PathBuf::from("C:/Users/user/.miseo/npm-tool/1.0.0+node-24.15.0");
-        let target =
-            PathBuf::from("C:/Users/user/.local/share/mise/installs/node/24.15.0/bin/foo.cmd");
+        let target = CommandTarget::env_wrapped(PathBuf::from(
+            "C:/Users/user/.local/share/mise/installs/node/24.15.0/bin/foo.cmd",
+        ));
 
         let content = super::powershell_shim_content(&project_dir, &target);
 
@@ -620,16 +656,16 @@ mod tests {
     }
 
     #[test]
-    fn write_mise_env_shim_creates_only_ps1_file() {
+    fn write_command_shim_creates_only_ps1_file() {
         let tmp = tempdir().unwrap();
         let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let project_dir = root.join("tool/1.0.0+node-24.15.0");
-        let target = root.join("global-bin/foo.cmd");
+        let target = CommandTarget::env_wrapped(root.join("global-bin/foo.cmd"));
         let shim = project_dir.join(".miseo/foo");
 
         WindowsFs.mkdir_p(&project_dir).unwrap();
         WindowsFs
-            .write_mise_env_shim(&project_dir, &target, &shim)
+            .write_command_shim(&project_dir, &target, &shim)
             .unwrap();
 
         assert!(!WindowsFs.exists(&shim).unwrap());
@@ -638,16 +674,16 @@ mod tests {
     }
 
     #[test]
-    fn write_mise_env_shim_invokes_global_path_for_cmd_targets() {
+    fn write_command_shim_uses_mise_env_for_env_wrapped_cmd_targets() {
         let tmp = tempdir().unwrap();
         let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let project_dir = root.join("tool/1.0.0+node-24.15.0");
-        let target = root.join("global-bin/foo.cmd");
+        let target = CommandTarget::env_wrapped(root.join("global-bin/foo.cmd"));
         let shim = project_dir.join(".miseo/foo");
 
         WindowsFs.mkdir_p(&project_dir).unwrap();
         WindowsFs
-            .write_mise_env_shim(&project_dir, &target, &shim)
+            .write_command_shim(&project_dir, &target, &shim)
             .unwrap();
 
         let content = WindowsFs.read_file(&shim.with_extension("ps1")).unwrap();
@@ -656,24 +692,46 @@ mod tests {
     }
 
     #[test]
-    fn write_mise_env_shim_prefers_powershell_sibling_for_extensionless_targets() {
+    fn write_command_shim_prefers_powershell_sibling_for_extensionless_targets() {
         let tmp = tempdir().unwrap();
         let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let project_dir = root.join("tool/1.0.0+node-24.15.0");
-        let target = root.join("global-bin/foo");
+        let target_path = root.join("global-bin/foo");
+        let target = CommandTarget::env_wrapped(target_path.clone());
         let shim = project_dir.join(".miseo/foo");
 
-        WindowsFs.mkdir_p(target.parent().unwrap()).unwrap();
-        WindowsFs.write_file(&target, "#!/bin/sh\n").unwrap();
+        WindowsFs.mkdir_p(target_path.parent().unwrap()).unwrap();
+        WindowsFs.write_file(&target_path, "#!/bin/sh\n").unwrap();
         WindowsFs
-            .write_file(&target.with_extension("ps1"), "")
+            .write_file(&target_path.with_extension("ps1"), "")
             .unwrap();
         WindowsFs
-            .write_mise_env_shim(&project_dir, &target, &shim)
+            .write_command_shim(&project_dir, &target, &shim)
             .unwrap();
 
         let content = WindowsFs.read_file(&shim.with_extension("ps1")).unwrap();
 
         assert!(content.contains("\\global-bin\\foo.ps1' @args"));
+    }
+
+    #[test]
+    fn write_command_shim_runs_powershell_node_entrypoint_without_mise_env() {
+        let tmp = tempdir().unwrap();
+        let root = PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let project_dir = root.join("tool/1.0.0+node-24.15.0");
+        let entrypoint = root.join("global-bin/entrypoints/tool.js");
+        let target = CommandTarget::runtime_entrypoint(crate::spec::Runtime::Node, entrypoint);
+        let shim = project_dir.join(".miseo/codex");
+
+        WindowsFs
+            .write_command_shim(&project_dir, &target, &shim)
+            .unwrap();
+
+        let content = WindowsFs.read_file(&shim.with_extension("ps1")).unwrap();
+
+        assert!(content.contains("$runtime = (& mise which 'node' -C"));
+        assert!(content.contains("$input | & $runtime"));
+        assert!(content.contains("\\entrypoints\\tool.js' @args"));
+        assert!(!content.contains("mise env"));
     }
 }

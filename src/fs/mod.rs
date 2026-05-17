@@ -2,7 +2,7 @@
 
 pub use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 
-use crate::error::Error;
+use crate::{error::Error, launch::CommandTarget};
 
 // TODO: we made this a trait so we can have a stateful test impl, but so far
 // we haven't needed it yet. If it's just to abstract between platforms it can
@@ -48,11 +48,11 @@ pub trait Fs {
     #[cfg(test)]
     fn write_executable_file(&self, path: &Path, content: &str) -> Result<(), Error>;
 
-    /// Write an executable shim that activates the tool-local mise env then executes `target`.
-    fn write_mise_env_shim(
+    /// Write an executable shim for `target`.
+    fn write_command_shim(
         &self,
         project_dir: &Path,
-        target: &Path,
+        target: &CommandTarget,
         path: &Path,
     ) -> Result<(), Error>;
 }
